@@ -1,0 +1,84 @@
+.kiosk-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background-color: #1a1a2e;
+    color: white;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.kiosk-container h1 {
+    margin-bottom: 20px;
+    font-size: 2.5rem;
+    color: #e94560;
+}
+
+.camera-section, .pin-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #16213e;
+    padding: 30px;
+    border-radius: 15px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+.webcam-view {
+    border: 5px solid #0f3460;
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+
+.controls {
+    display: flex;
+    gap: 15px;
+}
+
+.btn {
+    padding: 12px 25px;
+    font-size: 1.2rem;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: all 0.3s;
+}
+
+.btn-scan {
+    background-color: #e94560;
+    color: white;
+}
+.btn-scan:hover { background-color: #d1304b; }
+
+.btn-pin, .btn-back {
+    background-color: #0f3460;
+    color: white;
+}
+.btn-pin:hover, .btn-back:hover { background-color: #0b2545; }
+
+.pin-input {
+    padding: 15px;
+    font-size: 2rem;
+    text-align: center;
+    border-radius: 8px;
+    border: none;
+    margin-bottom: 20px;
+    background: #0f3460;
+    color: white;
+    letter-spacing: 5px;
+}
+
+.status-bar {
+    margin-top: 30px;
+    padding: 15px 30px;
+    border-radius: 30px;
+    font-size: 1.2rem;
+    font-weight: bold;
+}
+
+.status-bar.idle { background: #0f3460; }
+.status-bar.scanning { background: #f39c12; color: black; }
+.status-bar.success { background: #2ecc71; color: black; }
+.status-bar.failed, .status-bar.spoof_detected { background: #e74c3c; }
