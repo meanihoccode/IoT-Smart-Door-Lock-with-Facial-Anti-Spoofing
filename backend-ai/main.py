@@ -8,13 +8,20 @@ import insightface
 from anti_spoofing import anti_spoof_checker
 import mysql.connector
 import json
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(ENV_FILE)
 
 def get_db_connection():
     return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="1234",
-        database="btl_iot"
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "3306")),
+        user=os.getenv("DB_USERNAME", "root"),
+        password=os.getenv("DB_PASSWORD", ""),
+        database=os.getenv("DB_NAME", "btl_iot")
     )
 
 def load_known_faces():
