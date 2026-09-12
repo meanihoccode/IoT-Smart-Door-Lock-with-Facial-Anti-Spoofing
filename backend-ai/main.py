@@ -8,14 +8,10 @@ import insightface
 from anti_spoofing import anti_spoof_checker
 import mysql.connector
 import json
+from settings import database_config
 
 def get_db_connection():
-    return mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="1234",
-        database="btl_iot"
-    )
+    return mysql.connector.connect(**database_config())
 
 def load_known_faces():
     try:

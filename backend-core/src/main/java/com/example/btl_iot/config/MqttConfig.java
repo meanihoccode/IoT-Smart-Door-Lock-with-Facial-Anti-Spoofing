@@ -16,9 +16,14 @@ public class MqttConfig {
     @Value("${mqtt.client.id}")
     private String clientId;
 
+    @Value("${smartlock.mqtt.enabled:true}")
+    private boolean enabled;
+
     @Bean
     public MqttClient mqttClient() {
         try {
+            if (!enabled) return new MqttClient(brokerUrl, clientId,
+                    new org.eclipse.paho.client.mqttv3.persist.MemoryPersistence());
             MqttClient client = new MqttClient(brokerUrl, clientId);
             MqttConnectOptions options = new MqttConnectOptions();
             options.setAutomaticReconnect(true);
