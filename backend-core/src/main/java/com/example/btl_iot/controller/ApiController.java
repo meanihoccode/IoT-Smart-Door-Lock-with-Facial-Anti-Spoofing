@@ -23,7 +23,6 @@ import java.util.HashMap;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "*") // Allow requests from React frontend
 public class ApiController {
 
     @Autowired

@@ -1,0 +1,16 @@
+# Copy to application-local.properties and enter your own MySQL credentials.
+# This is a Java properties file; do not surround values with quotes.
+SMARTLOCK_DB_HOST=localhost
+SMARTLOCK_DB_PORT=3306
+SMARTLOCK_DB_NAME=btl_iot
+SMARTLOCK_DB_USER=root
+SMARTLOCK_DB_PASSWORD=
+SMARTLOCK_MQTT_BROKER_URL=tcp://localhost:1883
+
+# First start only: creates an admin if admin_accounts is empty.
+# Choose your own username and password (12+ characters, at most 72 UTF-8 bytes).
+# Remove the password here after the first successful login. Never commit it.
+SMARTLOCK_ADMIN_USERNAME=
+SMARTLOCK_ADMIN_PASSWORD=
+# Enable only behind HTTPS in deployment; leave false for local HTTP development.
+SMARTLOCK_SECURE_COOKIE=false

@@ -1,8 +1,0 @@
-cd e:\BTL_IOT\frontend
-npm run dev
-
-cd e:\BTL_IOT\backend-core
-.\gradlew bootRun
-
-cd e:\BTL_IOT\backend-ai
-python main.py

@@ -9,3 +9,5 @@ onnxruntime
 torch
 torchvision
 Pillow
+mysql-connector-python
+python-dotenv

@@ -1,0 +1,7 @@
+package com.example.btl_iot.repository;
+import com.example.btl_iot.entity.AdminAccount;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.Optional;
+public interface AdminAccountRepository extends JpaRepository<AdminAccount, Long> {
+    Optional<AdminAccount> findByUsername(String username);
+}

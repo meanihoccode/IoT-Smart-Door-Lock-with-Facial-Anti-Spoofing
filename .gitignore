@@ -35,3 +35,20 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# Local runtime and dependencies
+.venv/
+node_modules/
+.runtime/
+__pycache__/
+*.pyc
+backend-core/spring-boot-server-*/
+backend-core/*-tcplocalhost1883/
+
+# Private settings (commit the example files instead)
+.env
+.env.*
+!.env.example
+backend-core/config/application-local.properties
+esp32/config.h
+/anote.txt
