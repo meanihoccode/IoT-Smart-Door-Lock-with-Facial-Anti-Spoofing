@@ -1,170 +1,219 @@
-# Kế hoạch cải thiện xác thực khuôn mặt
+# Kế hoạch cải thiện độ chính xác AI xác thực khuôn mặt
 
-- Ngày lập: 11/09/2026.
-- Mốc code tham chiếu: `2f6c9664`.
-- Trạng thái: **chỉ lập kế hoạch; chưa triển khai hoặc thay ngưỡng xác thực**.
-- Phạm vi: frontend chụp/đăng ký ảnh, backend AI, hợp đồng kết quả với Spring Boot và kiểm chứng quyết định cho phép truy cập.
+- Ngày lập: 11/09/2026; rà soát và điều chỉnh phạm vi: 12/09/2026.
+- Mốc code lịch sử: `2f6c9664`; mức cơ sở mới là code AI sau giai đoạn 1 trong working tree hiện tại, cần chụp lại hash trước khi chạy thí nghiệm.
+- Trạng thái: giai đoạn 1 đã triển khai; giai đoạn 2–5 dưới đây là kế hoạch, chưa triển khai và chưa có số đo chứng minh tăng độ chính xác.
+- Phạm vi thực hiện tiếp theo: `backend-ai/`, công cụ Python thu/đánh giá ảnh, cấu hình thí nghiệm và báo cáo AI.
+- Phân công: phần web và Backend Core do thành viên khác trong team phụ trách. Các thay đổi trước đây ở giai đoạn 1 được giữ làm lịch sử.
+- Điều kiện hiện tại: chưa lắp mạch. Đánh giá thuật toán bằng ảnh/clip và gallery cục bộ, không phụ thuộc ESP32, relay, MQTT, frontend hay MySQL.
 
-## 1. Mục tiêu và nguyên tắc
+## 1. Mục tiêu và cách xác nhận cải thiện
 
-Giảm số lần người đã đăng ký bị từ chối nhầm, đồng thời kiểm soát việc nhận nhầm người lạ và chấp nhận ảnh/video giả. Đo riêng chất lượng nhận diện, chống giả mạo và độ trễ; không dùng một tỷ lệ “accuracy” chung để kết luận hệ thống tốt hơn.
+Mục tiêu là giúp người đã đăng ký được nhận đúng danh tính trong điều kiện sử dụng thực tế, đồng thời kiểm soát nhận nhầm người lạ và chấp nhận ảnh/video giả.
 
-Kế hoạch ưu tiên webcam và máy tính hiện có, giữ InsightFace `buffalo_l` làm mốc so sánh ban đầu. Chưa cần mua phần cứng, huấn luyện lại hoặc thay model ngay.
+Hai câu hỏi phải được đo riêng:
 
-- Đo mức hiện tại trước khi so sánh các cải tiến.
-- Không hạ ngưỡng chỉ để một người quét thành công.
-- Khi model, database hoặc kết quả AI lỗi, không cho phép mở cửa.
-- Các cấu hình 720p, 5–10 ảnh đăng ký và 3–5 khung hình xác thực là phương án thử nghiệm, chưa phải thông số đã tối ưu.
-- Mọi thử nghiệm quyết định mở cửa dùng bộ gửi MQTT giả lập; không kích hoạt khóa thật trong bộ kiểm thử.
+1. **Nhận diện:** mặt này có thuộc người đã đăng ký không, và trả về đúng người nào?
+2. **Chống giả mạo:** đầu vào camera là người thật hay ảnh/video được trình ra camera?
 
-## 2. Luồng hiện tại
+Đây là tìm danh tính trong gallery **1:N**, dù endpoint có tên `verify-face`. Chưa đổi sang 1:1 vì luồng hiện tại không cung cấp danh tính khai báo trước.
+
+Mỗi thay đổi phải có kết quả so sánh trên cùng bộ dữ liệu và quy trình. Kiểm thử code đạt không đồng nghĩa độ chính xác ảnh thật tăng; nhận đúng một người cũng chưa đo được khả năng nhận nhầm người khác. Khi chọn ngưỡng, báo riêng tỷ lệ không trả về đúng người, nhận nhầm người lạ và gán sai danh tính. Cách đánh giá có ngưỡng cho 1:N được tham chiếu từ [NIST FRTE 1:N](https://pages.nist.gov/frvt/html/frvt1N.html).
+
+Giữ `buffalo_l` làm mốc ban đầu. Ưu tiên sửa đầu vào, đo dữ liệu và hiệu chỉnh cách quyết định trước khi cân nhắc đổi hoặc huấn luyện lại model.
+
+## 2. Hiện trạng đã đối chiếu với code
+
+Luồng AI hiện tại trong [main.py](backend-ai/main.py):
 
 ```text
-Kiosk chụp một ảnh JPEG
-    → Spring Boot chuyển ảnh sang FastAPI
-    → InsightFace phát hiện mặt, căn chỉnh và lấy embedding 512 chiều
-    → Chọn faces[0]
-    → MiniFASNetV2 kiểm tra thật/giả
-    → So cosine với toàn bộ khuôn mặt đã đăng ký, ngưỡng 0.5
-    → Spring Boot kiểm tra is_real và recognized
-    → Gửi lệnh MQTT nếu được chấp nhận
+Giải mã ảnh
+  → kiểm tra model sẵn sàng
+  → InsightFace phát hiện mặt và lấy embedding
+  → chỉ chấp nhận đúng một mặt, embedding 512 chiều hợp lệ
+  → MiniFASNetV2: crop hiện tại → softmax → argmax
+  → đọc gallery, phân biệt DB lỗi / dữ liệu hỏng / chưa đăng ký
+  → so cosine với từng người, chọn điểm cao nhất với ngưỡng 0.5
+  → trả kết quả liveness, recognition và reasonCode
 ```
 
-Đây là tìm danh tính trong danh sách **1:N**, dù endpoint có tên `verify-face`. Đăng ký hiện nhận một file ảnh tải lên và lưu một embedding/người; giao diện AddUser chưa có chức năng chụp trực tiếp bằng webcam.
-
-## 3. Những vấn đề đã xác nhận
-
-| Ưu tiên | Bằng chứng trong code | Hệ quả / hướng xử lý |
+| Hạng mục | Trạng thái thực tế | Việc còn cần làm để cải thiện AI |
 | --- | --- | --- |
-| P0 | [anti_spoofing.py](backend-ai/anti_spoofing.py), dòng 39: model chưa tải được thì trả `True, 0.95`. Đường dẫn model phụ thuộc thư mục chạy. | Có thể bỏ qua chống giả mạo. Dùng đường dẫn theo module, báo model chưa sẵn sàng và từ chối xác thực. |
-| P0 | [ApiController.java](backend-core/src/main/java/com/example/btl_iot/controller/ApiController.java), dòng 87: có thể đi đến gửi lệnh dù `user_id` thiếu hoặc không tồn tại. | Chỉ cho phép khi kết quả AI hợp lệ và người dùng thực sự tồn tại, được phép truy cập. |
-| P1 | [anti_spoofing.py](backend-ai/anti_spoofing.py), dòng 54: crop vuông bằng cạnh lớn nhất rồi cắt cụt ở biên. | Khác crop tham chiếu; có thể làm lệch phân bố đầu vào của model. |
-| P1 | [anti_spoofing.py](backend-ai/anti_spoofing.py), dòng 74: chỉ dùng `argmax`, không có ngưỡng điểm lớp real. | Ví dụ `[0.33, 0.34, 0.33]` vẫn qua. `spoof_score` đang là điểm lớp thắng, không phải luôn là xác suất giả mạo. |
-| P1 | [Kiosk.jsx](frontend/src/Kiosk.jsx), dòng 21 và 105: một screenshot, `mirrored=true`, không cấu hình ảnh theo kích thước nguồn. | Ảnh quét bị lật ngang và kích thước phụ thuộc vùng hiển thị; không nhất quán với ảnh đăng ký. Mức ảnh hưởng cần đo. |
-| P1 | [AddUser.jsx](frontend/src/AddUser.jsx) và [User.java](backend-core/src/main/java/com/example/btl_iot/entity/User.java): một ảnh tải lên, một embedding/người. | Ít mẫu bao phủ góc mặt, ánh sáng và kính; thiếu kiểm soát chất lượng đầu vào. |
-| P1 | [main.py](backend-ai/main.py), dòng 101, 122 và 168: chọn `faces[0]`, ngưỡng nhận diện cố định `0.5`. | Không bảo đảm chọn đúng người khi có nhiều mặt; chưa có dữ liệu hiệu chỉnh ngưỡng trong repo. |
-| P1 | [main.py](backend-ai/main.py), dòng 27: lỗi database trả danh sách rỗng, embedding lỗi bị bỏ qua; endpoint `/` vẫn báo OK khi model lỗi. | Không phân biệt thiếu đăng ký với lỗi hệ thống; cần readiness và kiểm tra template hợp lệ. |
-| P1 | [ApiController.java](backend-core/src/main/java/com/example/btl_iot/controller/ApiController.java), dòng 100: nhiều lỗi đều trả “Verification failed”. | Người dùng và người kiểm tra không biết bước nào thất bại. |
+| Model thiếu/hỏng | Đã bỏ trả `True, 0.95`; có lỗi model và đường dẫn theo module trong [anti_spoofing.py](backend-ai/anti_spoofing.py) | Giữ hành vi từ chối; bổ sung test checkpoint hỏng và suy luận lỗi |
+| Nhiều khuôn mặt | Đã trả `MULTIPLE_FACES` trước khi xét liveness/so khớp | Không đưa việc sửa `faces[0]` trở lại danh sách tồn đọng |
+| Điểm liveness | Đã trả nhất quán `score[0][1]`, tức điểm softmax lớp real | Quyết định vẫn là `argmax`; chưa có ngưỡng hoặc vùng uncertain được hiệu chỉnh |
+| Crop liveness | Đang mở rộng thành hình vuông theo `max(w, h)`, rồi cắt cụt ở biên | Đối chiếu và sửa theo `CropImage`; đo tác động trên ảnh thực tế |
+| Nhận diện | `buffalo_l`, detection size `640×640`, cosine ngưỡng `0.5` | Chưa có báo cáo hiệu chỉnh ngưỡng cho camera/gallery của repo |
+| Chất lượng ảnh | Có tên mã `LOW_QUALITY`; log `quality_score=None` | Chưa tính chỉ số hoặc chặn ảnh theo chất lượng |
+| Gallery | Một embedding/người; kiểm tra 512 chiều, hữu hạn, chuẩn khác 0 | Đánh giá chọn mẫu tốt và tổng hợp nhiều ảnh trước khi đề xuất lưu nhiều template |
+| Dữ liệu/đánh giá | Có [8 test Python](backend-ai/tests/test_stage1_face_auth.py) dùng ảnh tổng hợp và kết quả model giả | Chưa có công cụ đánh giá độ chính xác, manifest chia tập hoặc báo cáo trước–sau trong phần AI đã kiểm tra |
 
-Phần không cần sửa theo phỏng đoán:
+Các lỗi fail-open, gộp DB lỗi với gallery rỗng và thiếu mã nguyên nhân là vấn đề lịch sử đã xử lý ở giai đoạn 1. Việc từng ghi nhận DB chưa có người đăng ký cũng là thông tin lần kiểm tra trước, không phải kết luận về DB hiện tại.
 
-- Công thức cosine hiện chia cho chuẩn của hai vector, đúng về mặt tính toán.
-- InsightFace đã căn chỉnh theo landmark trước khi trích xuất embedding.
-- MiniFASNet dùng BGR float trong khoảng `0–255`, phù hợp preprocessing tham chiếu. Không tự thêm `/255` hoặc chuyển RGB.
-- Hai checkpoint V2 và V1SE hiện có đã qua kiểm tra tải trọng số đúng kiến trúc và trả đầu ra ba lớp. Điều này không chứng minh độ chính xác trên webcam thực tế.
+## 3. Giai đoạn 1 — Giữ nền tảng đã triển khai
 
-Lần kiểm tra trước ghi nhận chưa có người dùng đăng ký, đủ để không thể xác thực thành công. Tuy nhiên log cũ không lưu đủ kết quả AI để kết luận riêng từng lần quét thất bại do bước nào; chưa có đánh giá trên ảnh hoặc chuỗi ảnh thực tế của người dùng.
+- [x] Ghi môi trường/model/cấu hình trong [PHASE1_IMPLEMENTATION_GUIDE.md](PHASE1_IMPLEMENTATION_GUIDE.md).
+- [x] Bỏ liveness giả lập cho qua khi model lỗi; thêm readiness model/database.
+- [x] Chuẩn hóa kết quả AI và phân biệt lỗi model, database, template, không có mặt, nhiều mặt, giả mạo và không nhận diện.
+- [x] Kiểm tra embedding; ghi request ID, điểm, model, ngưỡng và thời gian.
+- [x] Đã triển khai kiểm tra hợp đồng ở Core và hướng dẫn/timeout ở Kiosk trong phạm vi giai đoạn 1 trước đây.
 
-## 4. Kế hoạch triển khai
+Giới hạn của mốc này: `LOW_QUALITY` và `LIVENESS_UNCERTAIN` mới có trong hợp đồng; `quality_score` chưa được tính. Báo cáo triển khai ghi 8 test AI và 20 test Java đạt, nhưng các test đó kiểm tra logic với dữ liệu giả, không đánh giá độ chính xác camera. Khi rà lại mã test, chưa thấy ca riêng cho mọi tổ hợp checkpoint hỏng, inference lỗi, JSON toàn bộ null, sai kiểu và timeout. Những test hồi quy AI còn thiếu được đưa vào mục 8; phần test Core thuộc team tích hợp.
 
-### Giai đoạn 1 — Quan sát kết quả và xử lý lỗi an toàn (P0)
+## 4. Giai đoạn 2 — Đo mức cơ sở và sửa chống giả mạo
 
-- [ ] Ghi lại phiên bản thư viện, model và cấu hình hiện tại để tái lập mức cơ sở.
-- [ ] Thêm mã kết quả: `NO_ENROLLMENT`, `NO_FACE`, `MULTIPLE_FACES`, `LOW_QUALITY`, `LIVENESS_UNCERTAIN`, `SPOOF_DETECTED`, `NOT_RECOGNIZED`, `MODEL_UNAVAILABLE`, `DB_UNAVAILABLE`, `INVALID_AI_RESPONSE`.
-- [ ] Tách trạng thái tiến trình còn chạy với trạng thái model/database sẵn sàng phục vụ.
-- [ ] Khi thiếu hoặc hỏng model chống giả mạo, trả lỗi dịch vụ; loại bỏ kết quả giả lập cho qua.
-- [ ] Chuẩn hóa phản hồi AI: trạng thái, mã lý do, kết quả liveness/nhận diện và ID hợp lệ khi nhận diện thành công. Spring xử lý đầy đủ null, thiếu trường, sai kiểu và ID không tồn tại.
-- [ ] Ghi nội bộ `request_id`, số mặt, điểm chất lượng, `live_score`, điểm nhận diện, phiên bản model/ngưỡng và thời gian từng bước. Không mặc định ghi ảnh gốc, embedding hay PIN vào log.
-- [ ] Hiển thị hướng dẫn phù hợp trên Kiosk; thêm timeout và xử lý kết quả bất thường để không treo “Đang xử lý”.
+### 2A. Tạo bộ đánh giá AI độc lập trước khi đổi thuật toán
 
-Hoàn tất khi mọi nhánh lỗi có thể phân biệt và kiểm thử chứng minh không có lệnh mở cửa khi AI/database/model lỗi hoặc người dùng không hợp lệ.
+- [ ] Tách phần suy luận dùng chung thành module Python nhận ảnh và gallery đầu vào. API và công cụ đánh giá phải gọi cùng pipeline để tránh đo một thuật toán nhưng chạy một thuật toán khác.
+- [ ] Cho phép gallery thử nghiệm từ file cục bộ; chạy offline không đọc/ghi database ứng dụng.
+- [ ] Lưu cấu hình mức cơ sở: hash code, hash từng checkpoint/ONNX dùng thực tế, phiên bản thư viện/provider, thiết bị, detection size, crop, cách tính điểm, ngưỡng và gallery. Ghi phiên bản ngay lúc đo, không đợi tới nghiệm thu.
+- [ ] Tạo công cụ đọc manifest ảnh/clip, chạy model thật và xuất kết quả theo mẫu/lượt. Cấu trúc dữ liệu ở mục 7.
+- [ ] Đo ba nhánh: nhận diện riêng, chống giả mạo riêng và quyết định kết hợp. Nhánh nhận diện riêng được phép bỏ qua liveness chỉ trong công cụ đánh giá offline để tìm đúng nguồn lỗi; không tạo chế độ bypass ở endpoint xác thực.
+- [ ] Ghi lại `NO_FACE`, lỗi embedding, uncertain, ảnh chất lượng thấp và lỗi dịch vụ trong thống kê; không loại im lặng các lượt này.
+- [ ] Thu dữ liệu mức cơ sở trước khi sửa crop. Nếu chưa có ảnh được gán nhãn, có thể hoàn thành công cụ và unit test nhưng phần đo phải ghi rõ “chưa đánh giá”.
 
-### Giai đoạn 2 — Chuẩn hóa chống giả mạo (P1)
+Đầu ra: bộ dữ liệu có chia tập, cấu hình baseline và báo cáo lỗi theo từng bước/điều kiện. Đây là việc đầu tiên cần làm để biết lượt quét của người dùng bị từ chối do liveness hay nhận diện.
 
-- [ ] Dùng [CropImage](backend-ai/src/generate_patches.py), chuyển rõ `xyxy → xywh`, giữ cách scale và xử lý biên theo tham chiếu.
-- [ ] Kiểm tra bounding box rỗng, ngoài ảnh, không hợp lệ và crop sát biên.
-- [ ] Đặt tên điểm nhất quán: `live_score = p(real)`. Điểm softmax chưa được xem là xác suất đã hiệu chỉnh.
-- [ ] Thêm ngưỡng chấp nhận và trạng thái chưa đủ chắc chắn; chọn ngưỡng trên tập hiệu chỉnh sau khi sửa preprocessing.
-- [ ] Lấy V2 với crop chuẩn làm mốc; thử thêm V1SE ở scale tương ứng để so sánh kết hợp nhiều model.
-- [ ] Giữ phương án kết hợp chỉ khi cải thiện kết quả trên tập độc lập và đáp ứng độ trễ.
+### 2B. Chuẩn hóa crop và preprocessing MiniFASNet
 
-Hoàn tất khi crop đúng tham chiếu, lỗi model không bị coi là người thật và kết quả đo phân biệt rõ từ chối nhầm người thật với chấp nhận nhầm giả mạo.
+- [ ] Đổi bounding box InsightFace `xyxy → xywh`; ghi rõ quy ước tọa độ, làm tròn và biên inclusive/exclusive bằng test để tránh lệch một pixel.
+- [ ] Dùng [CropImage](backend-ai/src/generate_patches.py) với scale `2.7`, đầu ra `80×80` cho V2. So pixel với crop tham chiếu trên cùng ảnh/bbox hợp lệ ở giữa ảnh, bốn biên, góc và box không vuông.
+- [ ] Kiểm tra box rỗng/đảo chiều/NaN/ngoài ảnh; xử lý phần giao ảnh theo chính sách rõ ràng. Đầu vào không sử dụng được phải có lý do cụ thể.
+- [ ] Giữ BGR, float32, BCHW và thang đầu vào `0–255` đúng nhánh NumPy của [preprocessing MiniVision](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/src/data_io/functional.py).
+- [ ] Kiểm tra đầu ra model đúng ba lớp và hữu hạn; lỗi suy luận không được biến thành một điểm hợp lệ.
+- [ ] So baseline với “chỉ đổi crop” trong khi giữ nguyên checkpoint và quy tắc quyết định để đo riêng ảnh hưởng của crop.
 
-### Giai đoạn 3 — Chuẩn hóa chụp ảnh và đăng ký nhiều mẫu (P1)
+[Crop tham chiếu MiniVision](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/src/generate_patches.py) mở rộng chiều rộng/chiều cao theo scale và dịch box khi gặp biên. Sự khác biệt với crop hiện tại là bằng chứng cần sửa/kiểm thử; mức tăng độ chính xác vẫn phải đo. Detector của repo cũng có thể cho box khác demo MiniVision, nên crop khớp không đồng nghĩa toàn pipeline có đầu vào giống demo.
 
-- [ ] Yêu cầu độ phân giải camera phù hợp, thử ưu tiên 720p và có phương án khi camera không hỗ trợ; lấy screenshot theo nguồn camera.
-- [ ] Thống nhất chiều ảnh gửi lên giữa đăng ký và xác thực. Nếu cần preview kiểu gương, xử lý phần hiển thị riêng.
-- [ ] Chỉ chụp khi camera sẵn sàng; hướng dẫn người dùng điều chỉnh ánh sáng, khoảng cách và góc mặt.
-- [ ] Kiểm tra chất lượng ở server: đúng một mặt, đủ kích thước, không quá mờ/tối/cháy sáng và góc mặt phù hợp. Ngưỡng chất lượng phải được thử trên camera thực tế.
-- [ ] Thêm đăng ký trực tiếp bằng webcam, thử 5–10 ảnh đủ chất lượng với các góc nhẹ và điều kiện sử dụng điển hình.
-- [ ] Kiểm tra liveness cho đăng ký trực tiếp; tách rõ quy trình ảnh tải lên do quản trị viên duyệt.
-- [ ] Loại ảnh trùng và mẫu không nhất quán danh tính; kiểm tra embedding đúng 512 chiều, hữu hạn và có chuẩn khác 0.
-- [ ] Thiết kế lưu nhiều template/người, có phiên bản model/preprocessing, chất lượng và thời gian tạo. Có phương án chuyển dữ liệu cũ và đăng ký lại khi không tương thích.
-- [ ] So sánh vector đại diện được chuẩn hóa L2 với phương án nhiều template có giới hạn số lượng. Không mặc định lấy điểm lớn nhất trên càng nhiều mẫu càng tốt, vì phải đo lại khả năng nhận nhầm.
+Đầu ra: crop khớp tham chiếu trên đầu vào hợp lệ, test lỗi đầu vào và bảng trước–sau trên tập phát triển.
 
-Hoàn tất khi ảnh đăng ký/quét tuân cùng chính sách, ảnh không đạt được yêu cầu chụp lại với lý do cụ thể, dữ liệu cũ có đường chuyển đổi và mẫu mới được kiểm tra hợp lệ.
+### 2C. Hiệu chỉnh quyết định liveness
 
-### Giai đoạn 4 — Xác thực bằng chuỗi ảnh ngắn (P2)
+- [x] `live_score = score[real]` đã có từ giai đoạn 1. Đây là điểm softmax, không gọi là xác suất thực tế đã hiệu chỉnh.
+- [ ] Đo phân bố điểm cho người thật, ảnh in, ảnh trên màn hình và video replay từ camera mục tiêu.
+- [ ] Chọn hai ngưỡng `t_spoof < t_live` trên tập hiệu chỉnh: điểm thấp bị từ chối, vùng giữa trả `LIVENESS_UNCERTAIN`, điểm đủ cao mới được xét pass. Quy định rõ phép so sánh tại biên và cách xử lý khi lớp thắng mâu thuẫn với ngưỡng.
+- [ ] Với uncertain: trả `status=error`, `reasonCode=LIVENESS_UNCERTAIN`, `isReal=false`; recognition chưa chạy và không có matched user ID.
+- [ ] Báo riêng tỷ lệ người thật bị từ chối, tỷ lệ cần thử lại và tỷ lệ từng loại giả mạo được chấp nhận. Không chọn ngưỡng chỉ vì một ảnh của người dùng qua.
+- [ ] Chỉ sau khi có mốc V2 crop chuẩn, thử V1SE checkpoint đang có ở scale `4` và phương án kết hợp điểm. Mỗi phương án phải hiệu chỉnh ngưỡng riêng, rồi so ở cùng giới hạn chấp nhận giả mạo.
+- [ ] Nếu kết hợp nhiều model, tính trung bình/trọng số theo đúng số model cấu hình và thống nhất xử lý model lỗi. Không mặc định nhiều model là chính xác hơn.
 
-- [ ] Thử 3–5 frame trong một lượt, kiểm soát tổng thời gian xử lý và số lần thử lại.
-- [ ] Theo dõi cùng một người xuyên suốt các frame; ảnh nhiều người hoặc đổi danh tính không được gộp thành kết quả thành công.
-- [ ] Kết hợp chất lượng, liveness và điểm nhận diện bằng quy tắc được hiệu chỉnh. Không chấp nhận chỉ vì một frame bất kỳ vượt ngưỡng.
-- [ ] Thử điều kiện về khoảng cách điểm giữa hai danh tính đứng đầu để xử lý trường hợp mơ hồ; so sánh top-2 theo người, không theo hai template của cùng người.
-- [ ] Tránh tải model lại nhiều lần; cân nhắc chỉ chạy module cần thiết và giới hạn tác vụ suy luận đồng thời khi đo thấy nghẽn CPU.
-- [ ] Nếu thử cache embedding, phải cập nhật khi đăng ký/xóa/thay mẫu; cache cũ không được giữ quyền của người đã bị loại bỏ.
+Demo [MiniVision test.py](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/test.py) cung cấp cơ sở cho thử nghiệm nhiều scale/model; đó là phương án so sánh, chưa phải cấu hình được chọn cho repo này.
 
-Hoàn tất khi phương án chuỗi ảnh được đánh giá ở mức cả lượt xác thực, cải thiện so với một ảnh tại cùng giới hạn nhận nhầm và đạt độ trễ chấp nhận được. Nhiều frame không tự chứng minh chống được video phát lại.
+Hoàn tất giai đoạn 2 khi có bộ đánh giá dùng được, preprocessing đã kiểm chứng và báo cáo liveness trên dữ liệu camera có nhãn. Nếu thiếu dữ liệu hiệu chỉnh, ghi rõ ngưỡng còn thử nghiệm và chưa nghiệm thu độ chính xác.
 
-### Giai đoạn 5 — Hiệu chỉnh và nghiệm thu (P2)
+## 5. Giai đoạn 3 — Cải thiện nhận diện và mẫu đăng ký trong AI
 
-- [ ] Lập bộ dữ liệu pilot, có thể bắt đầu với 10–20 người qua nhiều buổi chụp; có cả người không được đăng ký.
-- [ ] Thu các điều kiện: đủ sáng, thiếu sáng, ngược sáng, góc nhẹ, kính, khoảng cách khác nhau, mặt gần biên và có nhiều người.
-- [ ] Kiểm tra giả mạo bằng ảnh in và ảnh/video hiển thị qua màn hình, được camera thực tế thu lại.
-- [ ] Tách dữ liệu đăng ký, hiệu chỉnh và kiểm thử cuối theo buổi/đoạn quay. Không đưa các frame liền kề của một video sang các tập khác nhau; giữ một nhóm người lạ độc lập cho kiểm thử cuối.
-- [ ] Đo mức cơ sở và từng cải tiến riêng để biết thay đổi nào có tác dụng; báo cả số lượng mẫu/lượt, điều kiện thử và sai số thống kê khi đủ dữ liệu.
-- [ ] Chọn ngưỡng nhận diện, liveness, chất lượng và cách kết hợp trên tập hiệu chỉnh; cố định cấu hình trước khi chạy tập kiểm thử cuối.
-- [ ] Ghim phiên bản dependency/model và lưu cấu hình được chọn. Chỉ đánh giá model khác nếu các bước trên chưa đạt yêu cầu.
+### 3A. Đo và kiểm soát chất lượng ảnh
 
-## 5. Chỉ số và điều kiện nghiệm thu
+- [ ] Dùng chung xử lý hướng ảnh/EXIF và giải mã cho đăng ký/xác thực; để InsightFace thực hiện căn chỉnh landmark như hiện tại.
+- [ ] Tính các chỉ số riêng: kích thước mặt, điểm detection, độ mờ, mức sáng, tỷ lệ vùng quá tối/cháy sáng, góc mặt và mức đầy đủ của khuôn mặt.
+- [ ] Ghi các chỉ số ở chế độ quan sát trước; kiểm tra tương quan với sai nhận diện/liveness trên tập phát triển rồi chọn ngưỡng trên tập hiệu chỉnh.
+- [ ] Trả `LOW_QUALITY` khi áp dụng gate đã chọn; giữ chi tiết chất lượng trong kết quả chẩn đoán AI. Không gộp các chỉ số thành một “điểm chất lượng” tùy ý.
+- [ ] Đo cả phần bị gate từ chối và tỷ lệ thành công toàn lượt. Không coi lọc hết ảnh khó là cải thiện độ chính xác.
+- [ ] Kiểm thử ảnh gốc và ảnh mô phỏng mờ/tối/resize để kiểm tra độ nhạy; ảnh mô phỏng không thay thế ảnh webcam thật trong nghiệm thu.
 
-| Nhóm | Chỉ số cần báo cáo | Điều kiện chọn phương án |
-| --- | --- | --- |
-| Nhận diện 1:N | Người đúng không được trả về đúng danh tính trên ngưỡng; người chưa đăng ký bị gán vào danh sách (FNIR/FPIR); số lượt gán nhầm giữa người đã đăng ký | Giảm lỗi người đúng tại giới hạn nhận nhầm đã chốt; đo trên kích thước danh sách dự kiến. |
-| Chống giả mạo | Người thật bị từ chối và ảnh/video giả được chấp nhận; phân theo loại tấn công | Không đánh đổi bằng việc cho qua khi model lỗi hoặc giảm bảo vệ dưới giới hạn đã chốt. |
-| Toàn luồng | Từ chối người hợp lệ, chấp nhận sai, phải chụp lại, lỗi dịch vụ | Tính trên toàn bộ lượt, gồm cả ảnh không đạt chất lượng; không loại lượt khó để làm đẹp kết quả. |
-| Hiệu năng | Thời gian p50/p95 mỗi lượt, mức dùng CPU/RAM | Đạt ngân sách độ trễ trên máy hiện có; báo riêng thời gian khởi động và xử lý ổn định. |
+Không tự thêm làm đẹp, phục hồi khuôn mặt sinh ảnh, sharpen mạnh, đổi màu hoặc tăng sáng cho toàn pipeline. Chỉ đưa một phép biến đổi vào thí nghiệm khi có giả thuyết cụ thể và đo riêng ảnh hưởng lên nhận diện lẫn chống giả mạo.
 
-Giới hạn nhận nhầm, giả mạo được chấp nhận và độ trễ sẽ được chốt trước khi chọn cấu hình thắng. Chưa đặt con số cam kết khi chưa có dữ liệu. Pilot nhỏ có thể phát hiện vấn đề nhưng chưa đủ chứng minh tỷ lệ lỗi rất thấp; không gặp lỗi trong một số lượt thử không đồng nghĩa lỗi bằng 0.
+### 3B. Tăng chất lượng template và hiệu chỉnh nhận diện 1:N
 
-## 6. Các kiểm thử bắt buộc
+- [ ] Giữ baseline một ảnh/người; thu thử 5–10 ảnh đăng ký ở góc nhẹ/ánh sáng/kính thường dùng. Đây là số mẫu khởi đầu, chưa phải mức tối ưu.
+- [ ] Loại mẫu trùng, ảnh không đạt và embedding không nhất quán với nhóm ảnh của cùng người. Không tự kết luận danh tính chỉ từ việc người tải ảnh khai cùng ID.
+- [ ] So sánh ba phương án offline: một ảnh tốt nhất; trung bình các embedding đã chuẩn hóa L2 rồi chuẩn hóa lại; nhiều template có giới hạn số lượng mỗi người.
+- [ ] Hiệu chỉnh cosine cho từng phương án trên đúng kích thước gallery dự kiến; ngưỡng `0.5` hiện tại chỉ là mốc so sánh, không mặc định là ngưỡng tối ưu.
+- [ ] Thử khoảng cách điểm top-1/top-2 theo hai người khác nhau để xử lý mơ hồ, đo riêng chi phí từ chối thêm. Gallery một người phải có quy tắc riêng vì không có top-2.
+- [ ] Đánh giá kết quả nhận diện riêng và cả pipeline kết hợp với liveness/quality đã chọn.
+- [ ] Gắn phiên bản model/preprocessing cho template đánh giá; không trộn embedding của model không tương thích.
 
-- [ ] Model thiếu/hỏng, database lỗi, phản hồi AI null/sai kiểu hoặc người dùng không tồn tại → không gửi lệnh mở cửa.
-- [ ] Crop ảnh tổng hợp ở giữa, sát bốn biên, khung không vuông và bounding box không hợp lệ → khớp tham chiếu hoặc trả lỗi rõ ràng.
-- [ ] Không có mặt, nhiều mặt, ảnh mờ/tối và embedding sai kích thước/NaN → không đăng ký hoặc xác thực nhầm.
-- [ ] Screenshot không bị thay đổi chính sách chiều ảnh/kích thước chỉ vì đổi kích thước cửa sổ trình duyệt.
-- [ ] Database không có template khác với database lỗi; người chưa đăng ký khác với phát hiện giả mạo.
-- [ ] Chuỗi frame đổi người, frame trùng hoặc chất lượng dao động → không được ghép thành kết quả cho phép sai.
-- [ ] Bộ kiểm thử độc lập có người thật, người lạ, ảnh in và video replay; xuất đủ các chỉ số ở mục 5.
+Công thức cosine hiện tại đã chia cho chuẩn hai vector. Chỉ chuẩn hóa lại embedding trước khi so cùng công thức không tự tạo ra độ chính xác mới; chuẩn hóa có ý nghĩa rõ khi tổng hợp nhiều mẫu hoặc lưu biểu diễn nhất quán.
 
-## 7. Phạm vi file dự kiến khi triển khai
+Thử nhiều mẫu dùng gallery file của công cụ AI. Phương án vector đại diện vẫn có thể xuất một embedding 512 chiều. Nếu chọn nhiều template/người hoặc API đăng ký nhiều ảnh, AI bàn giao cấu trúc và kết quả đo cho team tích hợp; schema MySQL và giao diện không thuộc đợt cải thiện AI này.
 
-| Thành phần | File / khu vực |
+Hoàn tất giai đoạn 3 khi phương án mẫu/ngưỡng giúp giảm lỗi người hợp lệ tại giới hạn nhận nhầm đã chốt, có báo cáo theo điều kiện và chỉ rõ phần nào chạy được với API hiện tại.
+
+## 6. Giai đoạn 4–5 — Thử nghiệm có điều kiện và nghiệm thu
+
+### Giai đoạn 4: chỉ mở rộng khi số đo ảnh đơn chỉ ra nhu cầu
+
+- [ ] Nếu lỗi chủ yếu dao động giữa các frame, thử 3–5 frame từ một clip ngắn trong công cụ Python; giữ cùng người xuyên suốt lượt.
+- [ ] So kết hợp điểm/biểu quyết đã định nghĩa trước với ảnh đơn. Không chấp nhận chỉ vì có một frame bất kỳ qua.
+- [ ] Test đổi người, nhiều người, frame lặp và chất lượng dao động. Đếm theo lượt/clip, không đếm các frame liền kề như các thử nghiệm độc lập.
+- [ ] Đo thời gian tổng trên CPU hiện có; chỉ tối ưu provider/module/batching khi phép đo xác nhận cần thiết.
+- [ ] Nếu pipeline đầu vào/threshold đã được hiệu chỉnh mà vẫn không đạt, chọn một model thay thế để benchmark theo cùng quy trình. Cân nhắc fine-tune chỉ khi có đủ dữ liệu huấn luyện riêng và một tập đánh giá độc lập.
+
+Nhiều frame và nhiều model là các nhánh thử nghiệm tùy kết quả, không phải điều kiện bắt buộc để hoàn thành bản AI tốt hơn. Xử lý chuỗi ảnh có thể đánh giá offline trước khi team web hỗ trợ gửi chuỗi frame.
+
+### Giai đoạn 5: cố định cấu hình và đánh giá cuối
+
+- [ ] Chốt phương án trên tập phát triển/hiệu chỉnh và khóa model, preprocessing, ngưỡng, cách tổng hợp trước khi mở tập kiểm thử cuối.
+- [ ] Chạy baseline và phương án đã chọn trên cùng tập cuối; xuất cả số lỗi/số lượt, tỷ lệ, điều kiện thu và p50/p95.
+- [ ] Kiểm tra giới hạn nhận nhầm/giả mạo đã chốt trước đó; báo độ bất định và giới hạn của cỡ mẫu.
+- [ ] Nếu dùng kết quả tập cuối để sửa tiếp, đánh dấu tập đó đã trở thành dữ liệu phát triển và cần tập nghiệm thu mới.
+- [ ] Bàn giao cấu hình có phiên bản, báo cáo trước–sau, test hồi quy, hướng dẫn dùng công cụ AI và yêu cầu tích hợp.
+- [ ] Ghi kết luận đúng mức: “đã sửa preprocessing”, “cải thiện trên pilot” hoặc “đạt tiêu chí trên tập độc lập”; không cam kết phần trăm accuracy khi chưa đo.
+
+## 7. Dữ liệu và chỉ số đánh giá
+
+Có thể bắt đầu chẩn đoán bằng ảnh của người dùng và một số thành viên đồng ý tham gia. Để so sánh khả năng nhận nhầm, mở rộng pilot khoảng 10–20 người, gồm cả người không nằm trong gallery. Số này giúp phát hiện vấn đề ban đầu, không đủ chứng minh tỷ lệ lỗi cực thấp.
+
+| Tập | Cách sử dụng |
 | --- | --- |
-| API AI, kết quả, kiểm tra template, nhận diện | [backend-ai/main.py](backend-ai/main.py) và các module tách thêm nếu cần |
-| Preprocessing, nạp model, điểm liveness | [backend-ai/anti_spoofing.py](backend-ai/anti_spoofing.py), [src/generate_patches.py](backend-ai/src/generate_patches.py) |
-| Chụp ảnh và phản hồi cho người dùng | [frontend/src/Kiosk.jsx](frontend/src/Kiosk.jsx), [frontend/src/AddUser.jsx](frontend/src/AddUser.jsx) |
-| Hợp đồng AI, kiểm tra quyền trước khi mở cửa | [ApiController.java](backend-core/src/main/java/com/example/btl_iot/controller/ApiController.java) |
-| Lưu nhiều mẫu và chuyển dữ liệu | Entity/repository trong `backend-core`, migration có kiểm soát |
-| Tái lập và đánh giá | Cấu hình ngưỡng/model, dependency đã ghim, script đánh giá và báo cáo thử nghiệm |
+| Đăng ký | Tạo gallery; không dùng các ảnh này làm probe để báo độ chính xác |
+| Phát triển | So crop, quality, phương án template/model; phân tích nguyên nhân |
+| Hiệu chỉnh | Chọn ngưỡng/cách quyết định của phương án; cho phép dùng lại có kiểm soát và lưu lịch sử thí nghiệm |
+| Kiểm thử cuối | Buổi/clip riêng, giữ kín đến khi chốt cấu hình; có nhóm người lạ độc lập với tập hiệu chỉnh |
 
-Tách kết quả “khuôn mặt hợp lệ”, “đã gửi lệnh” và “thiết bị xác nhận mở cửa” khi làm phần tích hợp; lỗi MQTT không phải lỗi độ chính xác AI. Bảo vệ quyền quản trị/đăng ký là hạng mục kiểm soát truy cập riêng cần xử lý trước khi dùng khóa thật, không được coi là đã giải quyết chỉ nhờ nâng độ chính xác model.
+Ảnh của cùng người đã đăng ký có thể xuất hiện ở các buổi khác nhau trong nhiều tập vì cần kiểm tra xác thực lại. Toàn bộ frame của một clip, ảnh trùng và bản biến đổi từ cùng ảnh phải nằm trong cùng một tập. Nhóm người lạ dành cho kiểm thử cuối không được dùng để chọn ngưỡng.
 
-## 8. Thứ tự ưu tiên và đầu ra
+Manifest dự kiến lưu `sample_id`, `relative_path`, `subject_id` dùng mã nội bộ, `session_id`, `clip_id`, `split`, `presentation_type` (live/print/screen_photo/replay), `camera_id`, điều kiện sáng/góc/kính và quy ước chiều ảnh. Lưu độ phân giải và hash ảnh để phát hiện trùng. Ảnh/embedding dùng nội bộ, không commit vào Git hoặc log mặc định.
 
-1. Triển khai giai đoạn 1 để phân biệt nguyên nhân và chặn lỗi nguy hiểm.
-2. Làm giai đoạn 2–3, thu dữ liệu và so sánh với mức cơ sở.
-3. Thử giai đoạn 4 khi ảnh đơn đã được chuẩn hóa, đồng thời đo chi phí thời gian.
-4. Hoàn tất giai đoạn 5, chốt cấu hình dựa trên kết quả độc lập.
+Dữ liệu chống giả mạo phải là camera quay/chụp lại người thật hoặc vật trình ra camera. File chân dung tải từ điện thoại và ảnh chụp màn hình thuần số không thể thay cho phép thử giả mạo được camera thu lại; MiniVision cũng nêu giới hạn theo camera và bối cảnh trong [hướng dẫn sử dụng](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/README_EN.md).
 
-Đầu ra cần có: code đã kiểm thử, cấu hình tái lập, dữ liệu mẫu/metadata được quản lý phù hợp, báo cáo trước–sau theo từng điều kiện, hướng dẫn đăng ký lại và giới hạn đã biết. Không triển khai hoặc thay đổi dịch vụ chỉ vì file kế hoạch này được tạo.
+| Nhóm | Chỉ số bắt buộc cho repo |
+| --- | --- |
+| Nhận diện 1:N | Tỷ lệ trả đúng người ở top-1 trên ngưỡng; không trả đúng người trên ngưỡng; người lạ bị nhận thành người đăng ký; gán sai giữa người đã đăng ký |
+| Chống giả mạo | Người thật bị từ chối; người thật cần thử lại; từng loại ảnh in/màn hình/video được chấp nhận |
+| Cả pipeline AI | Đúng danh tính qua toàn bộ gate; từ chối/uncertain/quality/lỗi dịch vụ; người lạ và giả mạo qua toàn bộ pipeline |
+| Hiệu năng | p50/p95 theo ảnh và theo lượt nếu nhiều frame; thời gian model khởi động báo riêng |
 
-## 9. Nguồn tham chiếu
+Với uncertain, báo một cột riêng và đồng thời tính là chưa được chấp nhận trong tỷ lệ người hợp lệ không qua toàn lượt. Với lỗi phát hiện/trích xuất, ghi cả tỷ lệ trên mẫu suy luận được và tỷ lệ trên toàn đầu vào; không dùng số liệu có điều kiện để che phần thất bại.
 
-- [MiniVision — crop tham chiếu](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/src/generate_patches.py): cách scale bounding box và xử lý biên.
-- [MiniVision — preprocessing](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/src/data_io/functional.py): cách chuyển ảnh sang tensor.
-- [MiniVision — demo kết hợp nhiều model](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/test.py): phương án nhiều scale để đưa vào thử nghiệm.
-- [MiniVision — hướng dẫn sử dụng](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/README_EN.md): độ nhạy với camera, bối cảnh và tư thế khuôn mặt.
-- [NIST — đánh giá nhận diện 1:N](https://pages.nist.gov/frvt/html/frvt1N.html): định nghĩa FNIR/FPIR và đánh giá với ngưỡng.
-- [NIST — đánh giá xác thực 1:1](https://pages.nist.gov/frvt/html/frvt11.html): mối quan hệ giữa nhận nhầm, từ chối nhầm và chất lượng ảnh.
+Điều kiện chọn phương án: giảm lỗi người hợp lệ trong khi đáp ứng giới hạn nhận nhầm người lạ, chấp nhận giả mạo và độ trễ đã xác định **trước khi chọn ngưỡng**. Nếu chưa chốt mục tiêu số, xuất đường đánh đổi và các cấu hình ứng viên, ghi rõ chưa chọn cấu hình vận hành. Báo số lỗi cùng mẫu số; tính độ bất định theo người/buổi/clip khi đủ dữ liệu, không giả định các frame liên tiếp độc lập.
 
-Các đề xuất về số ảnh, nhiều template, nhiều frame và cấu hình camera là giả thuyết thử nghiệm cho repo này; không phải mức cải thiện đã được các nguồn trên bảo đảm.
+## 8. Kiểm thử cần có trong phần AI
+
+Các mục chưa đánh dấu dưới đây là việc cần làm, không phải kết quả test đã đạt.
+
+- [x] Test hồi quy hiện có: checkpoint thiếu, face model không sẵn sàng, không có mặt, nhiều mặt, spoof, gallery rỗng khác DB lỗi, response thành công và không khớp.
+- [ ] Checkpoint hỏng, exception suy luận, đầu ra model sai shape/NaN/Inf, readiness thiếu dependency; không sinh kết quả thành công.
+- [ ] Crop khớp tham chiếu theo pixel; kiểm tra box lỗi, làm tròn, bốn biên/góc và ảnh kích thước khác nhau.
+- [ ] Probe/template sai kích thước, NaN/Inf, vector 0 và norm bất thường; không nhận diện hoặc đăng ký thành công.
+- [ ] Đăng ký không có mặt/nhiều mặt/ảnh không đạt; API và offline xử lý giống nhau.
+- [ ] Quy tắc tại đúng biên ngưỡng, uncertain, top-2, gallery một người, template trùng và mẫu khác danh tính.
+- [ ] Bộ tính metric kiểm tra được bằng ví dụ có đáp án biết trước; không bỏ mất lỗi decode/detection/quality và không rò rỉ dữ liệu giữa các tập.
+- [ ] Benchmark với model thật trên người đã đăng ký, người lạ và giả mạo qua camera, kèm báo cáo so sánh.
+
+Test HTTP null/sai kiểu/timeout và quyết định MQTT thuộc trách nhiệm tích hợp của team web/Core; không dùng các test đó để suy ra độ chính xác AI.
+
+## 9. Đầu ra dự kiến và giao tiếp với team web
+
+Các đường dẫn trong bảng sau là thiết kế dự kiến, chưa được tạo trong lần rà soát plan này.
+
+| Phần AI | Đầu ra dự kiến |
+| --- | --- |
+| Pipeline dùng chung | Module trong `backend-ai/` cho API và đánh giá offline |
+| Cấu hình thí nghiệm | `backend-ai/configs/`: model, preprocessing, threshold, checksum/version |
+| Thu dữ liệu độc lập | `backend-ai/tools/capture_dataset.py`: webcam → ảnh/clip + metadata, lưu khi người dùng chủ động thu |
+| Đánh giá/hiệu chỉnh | `backend-ai/tools/evaluate.py`, `calibrate.py`: manifest/gallery → kết quả và cấu hình |
+| Test hồi quy | `backend-ai/tests/`: crop, quality, recognition, liveness, metrics |
+| Báo cáo | `backend-ai/reports/`: cấu hình, số đo baseline/candidate và giới hạn; không chứa ảnh/embedding mặc định |
+
+Yêu cầu bàn giao để team web/Core phối hợp khi cần:
+
+- Ảnh gửi vào AI có hướng và mức nén nhất quán giữa đăng ký/quét; ưu tiên kích thước nguồn camera, ghi nhận kích thước thực. 720p là cấu hình thử, không phải yêu cầu đã tối ưu.
+- Giữ ổn định hai endpoint và trường hợp đồng giai đoạn 1 khi cải tiến ảnh đơn. Thay schema, thêm mã lý do hoặc gửi nhiều ảnh phải có tài liệu/version và phối hợp trước khi tích hợp.
+- Team web xử lý việc chụp lại khi nhận `LOW_QUALITY`/`LIVENESS_UNCERTAIN`; AI chịu trách nhiệm tính và trả kết quả.
+- Đăng ký nhiều ảnh/lưu nhiều template là hạng mục tích hợp sau khi AI chứng minh phương án đó có ích. Gallery offline cho phép thử trước.
+
+Thứ tự thực hiện gần nhất: **2A bộ đánh giá + baseline → 2B crop chuẩn → 2C hiệu chỉnh liveness → giai đoạn 3 chất lượng/template/ngưỡng nhận diện**. Kết quả baseline quyết định nhánh nào cần dành nhiều công sức hơn; nhiều model, nhiều frame và đổi model được cân nhắc theo số đo.
+
+Lần rà soát này chỉ cập nhật kế hoạch. Các bước triển khai AI tiếp theo được mô tả để có thể làm và kiểm chứng độc lập với tiến độ web/phần cứng.

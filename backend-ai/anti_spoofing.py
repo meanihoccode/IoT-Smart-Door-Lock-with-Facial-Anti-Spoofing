@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-import os
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import warnings
@@ -10,25 +10,42 @@ warnings.filterwarnings('ignore')
 
 from src.model_lib.MiniFASNet import MiniFASNetV2
 
+
+class LivenessModelUnavailableError(RuntimeError):
+    """Raised when liveness inference cannot be performed safely."""
+
+
 class AntiSpoofingModel:
     def __init__(self, model_dir="resources/anti_spoof_models"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_loaded = False
-        
-        model_path = os.path.join(model_dir, "2.7_80x80_MiniFASNetV2.pth")
-        if os.path.exists(model_path):
+        self.load_error = None
+        self.model_name = "2.7_80x80_MiniFASNetV2.pth"
+
+        model_dir_path = Path(model_dir)
+        if not model_dir_path.is_absolute():
+            model_dir_path = Path(__file__).resolve().parent / model_dir_path
+        self.model_path = model_dir_path / self.model_name
+
+        if self.model_path.exists():
             try:
                 self.model = MiniFASNetV2(conv6_kernel=(5, 5)).to(self.device)
-                state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+                state_dict = torch.load(self.model_path, map_location=self.device, weights_only=True)
                 new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
                 self.model.load_state_dict(new_state_dict)
                 self.model.eval()
                 self.model_loaded = True
-                print(f"Anti-Spoofing Model loaded successfully from {model_path} onto {self.device}")
+                print(f"Anti-Spoofing Model loaded successfully from {self.model_path} onto {self.device}")
             except Exception as e:
+                self.load_error = str(e)
                 print(f"Failed to load Anti-Spoofing Model: {e}")
         else:
-            print(f"Warning: Anti-spoofing model not found at {model_path}.")
+            self.load_error = f"Model file not found: {self.model_path}"
+            print(f"Warning: Anti-spoofing model not found at {self.model_path}.")
+
+    @property
+    def is_ready(self):
+        return self.model_loaded
 
     def predict(self, img, face_bbox):
         """
@@ -37,8 +54,9 @@ class AntiSpoofingModel:
         Returns: is_real (boolean), confidence (float)
         """
         if not self.model_loaded:
-            print("WARNING: Using mock Liveness Detection because model is not loaded!")
-            return True, 0.95
+            raise LivenessModelUnavailableError(
+                self.load_error or "Anti-spoofing model is not loaded"
+            )
             
         try:
             x1, y1, x2, y2 = [int(v) for v in face_bbox]
@@ -72,12 +90,15 @@ class AntiSpoofingModel:
             
             # Mảng output: 1 là real, 0 và 2 là spoof (print/replay)
             label = np.argmax(score)
-            confidence = score[0][label]
-            
-            return (label == 1), float(confidence)
+            # Return the score of the real class consistently. Stage 2 will
+            # calibrate a dedicated acceptance threshold for this score.
+            live_score = score[0][1]
+
+            return (label == 1), float(live_score)
             
         except Exception as e:
-            print(f"Lỗi khi chạy mô hình liveness: {e}")
-            return False, 0.0
+            raise LivenessModelUnavailableError(
+                f"Liveness inference failed: {e}"
+            ) from e
 
 anti_spoof_checker = AntiSpoofingModel()

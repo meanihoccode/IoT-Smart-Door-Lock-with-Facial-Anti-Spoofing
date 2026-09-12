@@ -1,11 +1,28 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import axios from 'axios';
-import { Camera, KeyRound, ArrowLeft, ShieldCheck, ShieldAlert, Loader2 } from 'lucide-react';
+import { Camera, KeyRound, ArrowLeft, ShieldCheck, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
+
+const FACE_ERROR_MESSAGES = {
+    NO_ENROLLMENT: 'Chưa có khuôn mặt nào được đăng ký. Hãy liên hệ quản trị viên.',
+    NO_FACE: 'Không tìm thấy khuôn mặt. Hãy nhìn thẳng vào camera và thử lại.',
+    MULTIPLE_FACES: 'Chỉ một người được đứng trước camera.',
+    LOW_QUALITY: 'Ảnh chưa đủ rõ. Hãy giữ yên và bảo đảm khuôn mặt đủ sáng.',
+    LIVENESS_UNCERTAIN: 'Chưa xác định được khuôn mặt thật. Hãy thử lại trong điều kiện sáng hơn.',
+    SPOOF_DETECTED: 'Phát hiện dấu hiệu giả mạo. Từ chối truy cập.',
+    NOT_RECOGNIZED: 'Khuôn mặt chưa được nhận diện hoặc chưa đăng ký.',
+    MODEL_UNAVAILABLE: 'Dịch vụ AI chưa sẵn sàng. Vui lòng thử lại sau.',
+    DB_UNAVAILABLE: 'Không thể đọc dữ liệu khuôn mặt. Vui lòng thử lại sau.',
+    INVALID_TEMPLATE: 'Dữ liệu khuôn mặt đăng ký đang có lỗi. Hãy liên hệ quản trị viên.',
+    INVALID_IMAGE: 'Ảnh chụp không hợp lệ. Hãy thử lại.',
+    INVALID_AI_RESPONSE: 'Kết quả AI không hợp lệ. Vui lòng thử lại sau.',
+    INTERNAL_ERROR: 'Máy chủ gặp lỗi khi xác thực. Vui lòng thử lại sau.',
+};
 
 const Kiosk = () => {
     const webcamRef = useRef(null);
+    const resetTimerRef = useRef(null);
     const [status, setStatus] = useState('IDLE'); // IDLE, SCANNING, SUCCESS, FAILED
     const [message, setMessage] = useState('Vui lòng hướng mặt vào camera');
     const [pin, setPin] = useState('');
@@ -17,9 +34,32 @@ const Kiosk = () => {
         setPin('');
     }, []);
 
+    const scheduleReset = useCallback((delayMs) => {
+        if (resetTimerRef.current) {
+            clearTimeout(resetTimerRef.current);
+        }
+        resetTimerRef.current = setTimeout(() => resetState(), delayMs);
+    }, [resetState]);
+
+    useEffect(() => () => {
+        if (resetTimerRef.current) {
+            clearTimeout(resetTimerRef.current);
+        }
+    }, []);
+
+    const showFaceFailure = useCallback((payload, fallbackMessage) => {
+        const reasonCode = payload?.reasonCode;
+        setStatus('FAILED');
+        setMessage(FACE_ERROR_MESSAGES[reasonCode] || payload?.message || fallbackMessage);
+        scheduleReset(8000);
+    }, [scheduleReset]);
+
     const captureAndVerify = useCallback(async () => {
         const imageSrc = webcamRef.current?.getScreenshot();
-        if (!imageSrc) return;
+        if (!imageSrc) {
+            showFaceFailure(null, 'Camera chưa sẵn sàng. Hãy kiểm tra quyền camera và thử lại.');
+            return;
+        }
 
         setStatus('SCANNING');
         setMessage('Đang xử lý...');
@@ -31,25 +71,25 @@ const Kiosk = () => {
             formData.append('file', blob, 'face.jpg');
 
             const response = await axios.post('http://localhost:8080/api/verify-face', formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
+                headers: { 'Content-Type': 'multipart/form-data' },
+                timeout: 25000,
             });
 
             if (response.data.status === 'success') {
                 setStatus('SUCCESS');
                 setMessage(response.data.message || 'Mở khóa thành công');
-                setTimeout(() => resetState(), 3000);
+                scheduleReset(3000);
+            } else {
+                showFaceFailure(response.data, 'Không thể xác thực khuôn mặt.');
             }
         } catch (error) {
-            const errorData = error.response?.data;
-            setStatus('FAILED');
-            if (errorData?.message?.includes('giả mạo')) {
-                 setMessage('Phát hiện giả mạo. Từ chối truy cập.');
+            if (error.code === 'ECONNABORTED') {
+                showFaceFailure(null, 'Xác thực quá thời gian. Hãy thử lại.');
             } else {
-                 setMessage(errorData?.message || 'Không thể nhận diện');
+                showFaceFailure(error.response?.data, 'Không thể kết nối tới máy chủ xác thực.');
             }
-            setTimeout(() => resetState(), 3000);
         }
-    }, [webcamRef, resetState]);
+    }, [showFaceFailure, scheduleReset]);
 
     const handlePinSubmit = async (e) => {
         e.preventDefault();
@@ -57,17 +97,21 @@ const Kiosk = () => {
         try {
             setStatus('SCANNING');
             setMessage('Đang xác thực mã PIN...');
-            const response = await axios.post('http://localhost:8080/api/verify-pin', { pinCode: pin });
+            const response = await axios.post(
+                'http://localhost:8080/api/verify-pin',
+                { pinCode: pin },
+                { timeout: 10000 },
+            );
             
             if (response.data.status === 'success') {
                 setStatus('SUCCESS');
                 setMessage('Mở khóa thành công');
-                setTimeout(() => resetState(), 3000);
+                scheduleReset(3000);
             }
-        } catch (error) {
+        } catch {
             setStatus('FAILED');
             setMessage('Mã PIN không chính xác');
-            setTimeout(() => resetState(), 3000);
+            scheduleReset(5000);
         }
     };
 
@@ -108,6 +152,10 @@ const Kiosk = () => {
                                         screenshotFormat="image/jpeg"
                                         className={`w-full h-full object-cover transition-opacity duration-300 ${status === 'SCANNING' ? 'opacity-50 grayscale' : 'opacity-100'}`}
                                         mirrored={true}
+                                        onUserMediaError={() => showFaceFailure(
+                                            null,
+                                            'Không thể truy cập camera. Hãy cấp quyền camera và tải lại trang.',
+                                        )}
                                     />
                                     
                                     {/* Focus Reticle (Minimal) */}
