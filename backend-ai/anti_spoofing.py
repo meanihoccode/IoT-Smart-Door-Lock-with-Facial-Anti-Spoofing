@@ -9,6 +9,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from src.model_lib.MiniFASNet import MiniFASNetV2
+from baseline_config import BASELINE
 
 
 class LivenessModelUnavailableError(RuntimeError):
@@ -20,7 +21,7 @@ class AntiSpoofingModel:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_loaded = False
         self.load_error = None
-        self.model_name = "2.7_80x80_MiniFASNetV2.pth"
+        self.model_name = BASELINE["liveness_model"]
 
         model_dir_path = Path(model_dir)
         if not model_dir_path.is_absolute():
@@ -65,7 +66,7 @@ class AntiSpoofingModel:
             w = x2 - x1
             h = y2 - y1
             # Theo thuật toán chuẩn của Silent-Face-Anti-Spoofing, crop khuôn mặt có padding (scale)
-            scale = 2.7
+            scale = BASELINE["liveness_scale"]
             cx = x1 + w // 2
             cy = y1 + h // 2
             
@@ -79,7 +80,7 @@ class AntiSpoofingModel:
             cropped_face = img[y1_new:y2_new, x1_new:x2_new]
             
             # Resize về 80x80 cho MiniFASNetV2
-            resized_face = cv2.resize(cropped_face, (80, 80))
+            resized_face = cv2.resize(cropped_face, tuple(BASELINE["liveness_input_size"]))
             
             # Preprocess tensor (HWC to BCHW)
             tensor_img = torch.from_numpy(resized_face).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
@@ -101,4 +102,4 @@ class AntiSpoofingModel:
                 f"Liveness inference failed: {e}"
             ) from e
 
-anti_spoof_checker = AntiSpoofingModel()
+# Instantiate explicitly at API startup or CLI execution, never at import time.

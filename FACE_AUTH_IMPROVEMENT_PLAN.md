@@ -2,7 +2,7 @@
 
 - Ngày lập: 11/09/2026; rà soát và điều chỉnh phạm vi: 12/09/2026.
 - Mốc code lịch sử: `2f6c9664`; mức cơ sở mới là code AI sau giai đoạn 1 trong working tree hiện tại, cần chụp lại hash trước khi chạy thí nghiệm.
-- Trạng thái: giai đoạn 1 đã triển khai; giai đoạn 2–5 dưới đây là kế hoạch, chưa triển khai và chưa có số đo chứng minh tăng độ chính xác.
+- Trạng thái: giai đoạn 1 và công cụ giai đoạn 2A đã triển khai; chưa có dữ liệu gán nhãn để đo baseline và chưa có số đo chứng minh tăng độ chính xác.
 - Phạm vi thực hiện tiếp theo: `backend-ai/`, công cụ Python thu/đánh giá ảnh, cấu hình thí nghiệm và báo cáo AI.
 - Phân công: phần web và Backend Core do thành viên khác trong team phụ trách. Các thay đổi trước đây ở giai đoạn 1 được giữ làm lịch sử.
 - Điều kiện hiện tại: chưa lắp mạch. Đánh giá thuật toán bằng ảnh/clip và gallery cục bộ, không phụ thuộc ESP32, relay, MQTT, frontend hay MySQL.
@@ -64,15 +64,15 @@ Giới hạn của mốc này: `LOW_QUALITY` và `LIVENESS_UNCERTAIN` mới có 
 
 ### 2A. Tạo bộ đánh giá AI độc lập trước khi đổi thuật toán
 
-- [ ] Tách phần suy luận dùng chung thành module Python nhận ảnh và gallery đầu vào. API và công cụ đánh giá phải gọi cùng pipeline để tránh đo một thuật toán nhưng chạy một thuật toán khác.
-- [ ] Cho phép gallery thử nghiệm từ file cục bộ; chạy offline không đọc/ghi database ứng dụng.
-- [ ] Lưu cấu hình mức cơ sở: hash code, hash từng checkpoint/ONNX dùng thực tế, phiên bản thư viện/provider, thiết bị, detection size, crop, cách tính điểm, ngưỡng và gallery. Ghi phiên bản ngay lúc đo, không đợi tới nghiệm thu.
-- [ ] Tạo công cụ đọc manifest ảnh/clip, chạy model thật và xuất kết quả theo mẫu/lượt. Cấu trúc dữ liệu ở mục 7.
-- [ ] Đo ba nhánh: nhận diện riêng, chống giả mạo riêng và quyết định kết hợp. Nhánh nhận diện riêng được phép bỏ qua liveness chỉ trong công cụ đánh giá offline để tìm đúng nguồn lỗi; không tạo chế độ bypass ở endpoint xác thực.
-- [ ] Ghi lại `NO_FACE`, lỗi embedding, uncertain, ảnh chất lượng thấp và lỗi dịch vụ trong thống kê; không loại im lặng các lượt này.
+- [x] Tách phần suy luận dùng chung thành module Python nhận ảnh và gallery đầu vào. API và công cụ đánh giá gọi cùng `FacePipeline`; endpoint không có chế độ bỏ qua liveness.
+- [x] Cho phép gallery thử nghiệm từ manifest/file cục bộ; chạy offline không đọc/ghi database ứng dụng.
+- [x] Lưu cấu hình mức cơ sở và snapshot: hash code, checkpoint/ONNX, dependency/provider, thiết bị, detection size, crop, cách tính điểm, ngưỡng và gallery.
+- [x] Tạo công cụ đọc manifest ảnh/clip, chạy model thật và xuất kết quả theo mẫu/lượt. Cấu trúc dữ liệu ở mục 7.
+- [x] Đo ba nhánh: nhận diện riêng, chống giả mạo riêng và quyết định kết hợp. Nhánh nhận diện riêng chỉ tồn tại trong công cụ offline.
+- [x] Giữ lỗi decode/detection/embedding/model và reason code trong thống kê; không loại im lặng các lượt này. `LOW_QUALITY`/uncertain sẽ có số đo thực sau khi thuật toán tương ứng được triển khai.
 - [ ] Thu dữ liệu mức cơ sở trước khi sửa crop. Nếu chưa có ảnh được gán nhãn, có thể hoàn thành công cụ và unit test nhưng phần đo phải ghi rõ “chưa đánh giá”.
 
-Đầu ra: bộ dữ liệu có chia tập, cấu hình baseline và báo cáo lỗi theo từng bước/điều kiện. Đây là việc đầu tiên cần làm để biết lượt quét của người dùng bị từ chối do liveness hay nhận diện.
+Đầu ra công cụ và hướng dẫn đã hoàn thành ngày 14/09/2026; chi tiết tại [PHASE2A_EVALUATION_GUIDE.md](PHASE2A_EVALUATION_GUIDE.md). Bộ dữ liệu và báo cáo accuracy vẫn chờ ảnh webcam được gán nhãn.
 
 ### 2B. Chuẩn hóa crop và preprocessing MiniFASNet
 
@@ -189,23 +189,22 @@ Các mục chưa đánh dấu dưới đây là việc cần làm, không phải
 - [ ] Probe/template sai kích thước, NaN/Inf, vector 0 và norm bất thường; không nhận diện hoặc đăng ký thành công.
 - [ ] Đăng ký không có mặt/nhiều mặt/ảnh không đạt; API và offline xử lý giống nhau.
 - [ ] Quy tắc tại đúng biên ngưỡng, uncertain, top-2, gallery một người, template trùng và mẫu khác danh tính.
-- [ ] Bộ tính metric kiểm tra được bằng ví dụ có đáp án biết trước; không bỏ mất lỗi decode/detection/quality và không rò rỉ dữ liệu giữa các tập.
+- [x] Bộ tính metric đã được kiểm tra bằng ví dụ có đáp án biết trước; lỗi decode/detection được giữ trong mẫu số và validator chặn rò rỉ hash/source/session/clip giữa các tập. Quality gate vẫn chờ giai đoạn 3A.
 - [ ] Benchmark với model thật trên người đã đăng ký, người lạ và giả mạo qua camera, kèm báo cáo so sánh.
 
 Test HTTP null/sai kiểu/timeout và quyết định MQTT thuộc trách nhiệm tích hợp của team web/Core; không dùng các test đó để suy ra độ chính xác AI.
 
 ## 9. Đầu ra dự kiến và giao tiếp với team web
 
-Các đường dẫn trong bảng sau là thiết kế dự kiến, chưa được tạo trong lần rà soát plan này.
-
-| Phần AI | Đầu ra dự kiến |
+| Phần AI | Trạng thái / đầu ra |
 | --- | --- |
-| Pipeline dùng chung | Module trong `backend-ai/` cho API và đánh giá offline |
-| Cấu hình thí nghiệm | `backend-ai/configs/`: model, preprocessing, threshold, checksum/version |
-| Thu dữ liệu độc lập | `backend-ai/tools/capture_dataset.py`: webcam → ảnh/clip + metadata, lưu khi người dùng chủ động thu |
-| Đánh giá/hiệu chỉnh | `backend-ai/tools/evaluate.py`, `calibrate.py`: manifest/gallery → kết quả và cấu hình |
-| Test hồi quy | `backend-ai/tests/`: crop, quality, recognition, liveness, metrics |
-| Báo cáo | `backend-ai/reports/`: cấu hình, số đo baseline/candidate và giới hạn; không chứa ảnh/embedding mặc định |
+| Pipeline dùng chung | Đã có `backend-ai/face_pipeline.py` cho API và đánh giá offline |
+| Cấu hình thí nghiệm | Đã có `backend-ai/configs/baseline.json`: model, preprocessing, threshold và chính sách baseline |
+| Thu dữ liệu độc lập | Đã có `backend-ai/tools/capture_dataset.py`: webcam → ảnh + metadata khi người dùng chủ động chạy |
+| Đánh giá | Đã có `backend-ai/tools/evaluate.py`: manifest/gallery → kết quả, metric và snapshot có hash |
+| Hiệu chỉnh | `calibrate.py` sẽ được tạo ở giai đoạn 2C sau khi có dữ liệu liveness gán nhãn |
+| Test hồi quy | Đã có test pipeline/manifest/metric; crop, quality, threshold calibration tiếp tục ở các giai đoạn tương ứng |
+| Báo cáo | `backend-ai/reports/` đã tạo snapshot/smoke report cục bộ và được ignore; chưa có báo cáo accuracy ảnh thật |
 
 Yêu cầu bàn giao để team web/Core phối hợp khi cần:
 
@@ -216,4 +215,4 @@ Yêu cầu bàn giao để team web/Core phối hợp khi cần:
 
 Thứ tự thực hiện gần nhất: **2A bộ đánh giá + baseline → 2B crop chuẩn → 2C hiệu chỉnh liveness → giai đoạn 3 chất lượng/template/ngưỡng nhận diện**. Kết quả baseline quyết định nhánh nào cần dành nhiều công sức hơn; nhiều model, nhiều frame và đổi model được cân nhắc theo số đo.
 
-Lần rà soát này chỉ cập nhật kế hoạch. Các bước triển khai AI tiếp theo được mô tả để có thể làm và kiểm chứng độc lập với tiến độ web/phần cứng.
+Đợt 2A đã hoàn thành phần code, kiểm thử, snapshot model và hướng dẫn thu dữ liệu. Bước còn lại trước 2B là thu ảnh webcam có nhãn và chạy baseline thực tế.

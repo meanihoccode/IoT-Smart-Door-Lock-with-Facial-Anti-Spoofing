@@ -34,7 +34,24 @@ class FakeFaceApp:
         return self.faces
 
 
+class FakeLiveness:
+    model_loaded = True
+
+    @property
+    def is_ready(self):
+        return self.model_loaded
+
+    def predict(self, _image, _bbox):
+        return True, 0.9
+
+
 class StageOneFaceAuthTests(unittest.TestCase):
+    def setUp(self):
+        # Runtime now loads only in FastAPI lifespan. Unit tests need no assets.
+        self.checker_patch = patch.object(main, "anti_spoof_checker", FakeLiveness())
+        self.checker_patch.start()
+        self.addCleanup(self.checker_patch.stop)
+
     def make_upload(self):
         image = np.full((120, 120, 3), 127, dtype=np.uint8)
         encoded, buffer = cv2.imencode(".jpg", image)

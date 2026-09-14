@@ -1,0 +1,19 @@
+{
+  "version": "phase2a-baseline-v1",
+  "face_model": "buffalo_l",
+  "detection_size": [640, 640],
+  "face_context_id": -1,
+  "embedding_size": 512,
+  "recognition_threshold": 0.5,
+  "gallery_strategy": "one_image_per_subject",
+  "liveness_model": "2.7_80x80_MiniFASNetV2.pth",
+  "liveness_device": "auto",
+  "liveness_crop": "square_max_side_clipped_v1",
+  "liveness_scale": 2.7,
+  "liveness_input_size": [80, 80],
+  "liveness_preprocessing": "BGR_float32_BCHW_0_255",
+  "liveness_decision": "argmax_class_1",
+  "quality_gate": "disabled",
+  "max_upload_bytes": 10485760,
+  "video_policy": "one_explicit_frame_per_attempt"
+}
