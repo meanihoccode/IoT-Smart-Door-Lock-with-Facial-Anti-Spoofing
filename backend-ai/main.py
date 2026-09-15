@@ -1,170 +1,177 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-import cv2
-import numpy as np
-import io
-from PIL import Image
-import insightface
-from anti_spoofing import anti_spoof_checker
-import mysql.connector
+"""HTTP/DB adapter for the shared AI pipeline. Response contract stays phase-1 compatible."""
+from contextlib import asynccontextmanager
 import json
+import logging
+import os
+from pathlib import Path
+from time import perf_counter
+from uuid import uuid4
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.responses import JSONResponse
+import mysql.connector
+
+from face_pipeline import (
+    FACE_MODEL_NAME, FACE_EMBEDDING_SIZE, RECOGNITION_THRESHOLD,
+    MAX_UPLOAD_BYTES, REASON_MESSAGES, DatabaseUnavailableError,
+    InvalidTemplateError, PipelineError, FacePipeline, decode_image,
+    validate_embedding, compute_cosine_similarity, elapsed_ms,
+    verification_response, finish_response,
+)
+from model_runtime import load_models
 from settings import database_config
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+logger = logging.getLogger("face-auth")
+
+face_app = None
+anti_spoof_checker = None
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    global face_app, anti_spoof_checker
+    face_app, anti_spoof_checker = load_models()
+    yield
+
+
+app = FastAPI(
+    title="Face Recognition API",
+    description="AI Backend for Smart Lock",
+    lifespan=lifespan
+)
+
 
 def get_db_connection():
     return mysql.connector.connect(**database_config())
 
-def load_known_faces():
+
+def check_database():
+    connection = None
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, username, full_name, face_embedding FROM users WHERE face_embedding IS NOT NULL")
+        connection = get_db_connection()
+        connection.ping(reconnect=False, attempts=1, delay=0)
+        return True
+    except mysql.connector.Error:
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def load_known_faces():
+    connection = cursor = None
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id, username, full_name, face_embedding "
+                       "FROM users WHERE face_embedding IS NOT NULL")
         users = cursor.fetchall()
-        
-        known = []
-        for u in users:
-            try:
-                emb_list = json.loads(u['face_embedding'])
-                emb_array = np.array(emb_list, dtype=np.float32)
-                known.append({
-                    "id": u['id'],
-                    "username": u['username'],
-                    "full_name": u['full_name'],
-                    "embedding": emb_array
-                })
-            except Exception as e:
-                pass
-        cursor.close()
-        conn.close()
-        return known
-    except Exception as e:
-        print(f"DB Error: {e}")
-        return []
+    except mysql.connector.Error as exc:
+        raise DatabaseUnavailableError() from exc
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None:
+            connection.close()
+    known_faces = []
+    for user in users:
+        try:
+            embedding = validate_embedding(json.loads(user["face_embedding"]), "INVALID_TEMPLATE")
+        except (ValueError, TypeError, PipelineError) as exc:
+            raise InvalidTemplateError() from exc
+        known_faces.append({"id": user["id"], "username": user["username"],
+                            "full_name": user["full_name"], "embedding": embedding})
+    return known_faces
 
-def compute_cosine_similarity(emb1, emb2):
-    dot = np.dot(emb1, emb2)
-    norm1 = np.linalg.norm(emb1)
-    norm2 = np.linalg.norm(emb2)
-    if norm1 == 0 or norm2 == 0: return 0.0
-    return dot / (norm1 * norm2)
 
-app = FastAPI(title="Face Recognition API", description="AI Backend for Smart Lock")
+def request_id_from(request):
+    supplied = request.headers.get("x-request-id", "").strip()
+    if supplied and len(supplied) <= 64 and all(c.isalnum() or c in "-_." for c in supplied):
+        return supplied
+    return str(uuid4())
 
-# Initialize InsightFace (This automatically downloads models if not present)
-print("Loading InsightFace models (RetinaFace + ArcFace)...")
-try:
-    face_app = insightface.app.FaceAnalysis(name='buffalo_l')
-    # Use ctx_id=0 for GPU, -1 for CPU
-    face_app.prepare(ctx_id=-1, det_size=(640, 640)) 
-except Exception as e:
-    print(f"Warning: Could not initialize InsightFace: {e}")
-    face_app = None
+
+def log_verification(result):
+    logger.info(
+        "event=face_verification request_id=%s reason=%s status=%s face_count=%s "
+        "quality_score=None live_score=%s similarity=%s gallery_size=%s "
+        "face_model=%s liveness_model=%s recognition_threshold=%s timings_ms=%s",
+        result["requestId"], result["reasonCode"], result["status"], result["faceCount"],
+        result["liveness"]["liveScore"], result["recognition"]["similarity"],
+        result["recognition"]["gallerySize"], result["models"]["faceRecognition"],
+        result["models"]["antiSpoofing"], result["recognition"]["threshold"],
+        json.dumps(result["timingsMs"], separators=(",", ":")),
+    )
 
 
 @app.get("/")
 def read_root():
-    return {"status": "ok", "message": "AI Backend is running"}
+    return {"status": "ok", "message": "AI Backend process is running", "readyUrl": "/ready"}
+
+
+@app.get("/ready")
+def readiness():
+    dependencies = {"faceModel": face_app is not None,
+                    "livenessModel": FacePipeline(face_app, anti_spoof_checker).liveness_ready,
+                    "database": check_database()}
+    return JSONResponse(status_code=200 if all(dependencies.values()) else 503,
+                        content={"status": "ready" if all(dependencies.values()) else "not_ready",
+                                 "dependencies": dependencies,
+                                 "models": verification_response()["models"]})
+
 
 @app.post("/api/verify-face")
-async def verify_face(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.jpg', '.jpeg', '.png')):
-        raise HTTPException(status_code=400, detail="Invalid image format")
-        
+async def verify_face(request: Request, file: UploadFile = File(...)):
+    started = perf_counter()
+    request_id = request_id_from(request)
+    result = verification_response(request_id)
+    decode_started = perf_counter()
     try:
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is None:
-            raise HTTPException(status_code=400, detail="Could not read image")
+        contents = await file.read(MAX_UPLOAD_BYTES + 1)
+        image = decode_image(contents, file.filename)
+        decode_ms = elapsed_ms(decode_started)
+        result = FacePipeline(face_app, anti_spoof_checker).verify(image, load_known_faces, request_id)
+        result["timingsMs"]["decode"] = decode_ms
+    except PipelineError as exc:
+        finish_response(result, exc.reason_code, started)
+        result["timingsMs"]["decode"] = elapsed_ms(decode_started)
+    except Exception:
+        logger.exception("event=face_verification_failed request_id=%s", request_id)
+        finish_response(result, "INTERNAL_ERROR", started)
+    result["timingsMs"]["total"] = elapsed_ms(started)
+    log_verification(result)
+    return JSONResponse(result)
 
-        if face_app is None:
-            return JSONResponse({"status": "error", "message": "AI Models not loaded. Please install insightface and onnxruntime."})
-
-        # Step 1: Face Detection & Feature Extraction (RetinaFace + ArcFace)
-        faces = face_app.get(img)
-        
-        if len(faces) == 0:
-            return JSONResponse({"status": "error", "message": "Không tìm thấy khuôn mặt trong ảnh!"})
-            
-        # We assume the largest face or the first one is the target
-        target_face = faces[0] 
-        bbox = target_face.bbox # [x1, y1, x2, y2]
-        embedding = target_face.embedding # 512-d vector
-
-        # Step 2: Liveness Detection (Silent-Face-Anti-Spoofing)
-        is_real, spoof_score = anti_spoof_checker.predict(img, bbox)
-        
-        if not is_real:
-            return JSONResponse({
-                "status": "error",
-                "message": "Phát hiện giả mạo! Liveness check failed.",
-                "is_real": False
-            })
-
-        # Step 3: Face Recognition (Cosine Similarity)
-        known_faces = load_known_faces()
-        
-        recognized = False
-        user_id = None
-        user_name = None
-        best_similarity = -1.0
-        threshold = 0.5  # Cosine similarity threshold for InsightFace
-
-        for known in known_faces:
-            sim = compute_cosine_similarity(embedding, known['embedding'])
-            if sim > best_similarity:
-                best_similarity = sim
-                if sim >= threshold:
-                    recognized = True
-                    user_id = known['id']
-                    user_name = known['username']
-
-        return JSONResponse({
-            "status": "success",
-            "is_real": True,
-            "spoof_score": float(spoof_score),
-            "face_detected": True,
-            "recognized": recognized,
-            "user_id": user_id,
-            "username": user_name,
-            "similarity": float(best_similarity),
-            "message": f"Welcome {user_name}" if recognized else "Face verified but not recognized"
-        })
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.post("/api/extract-embedding")
-async def extract_embedding(file: UploadFile = File(...)):
-    """API dùng để đăng ký khuôn mặt mới, trả về mảng 512 số"""
+async def extract_embedding(request: Request, file: UploadFile = File(...)):
+    started = perf_counter()
+    request_id = request_id_from(request)
+    result = {"status": "error", "requestId": request_id}
     try:
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is None:
-            raise HTTPException(status_code=400, detail="Could not read image")
-            
-        if face_app is None:
-            return JSONResponse({"status": "error", "message": "AI Models not loaded."})
+        contents = await file.read(MAX_UPLOAD_BYTES + 1)
+        image = decode_image(contents, file.filename)
+        embedding = FacePipeline(face_app, anti_spoof_checker).extract(image)
+        reason = "EMBEDDING_EXTRACTED"
+        result.update(status="success", faceCount=1, embedding=embedding.tolist(),
+                      model=FACE_MODEL_NAME, totalMs=elapsed_ms(started))
+    except PipelineError as exc:
+        reason = exc.reason_code
+    except Exception:
+        logger.exception("event=embedding_extraction_failed request_id=%s", request_id)
+        reason = "INTERNAL_ERROR"
+    result.update(reasonCode=reason, message=REASON_MESSAGES[reason])
+    logger.info("event=embedding_result request_id=%s reason=%s total_ms=%s",
+                request_id, reason, elapsed_ms(started))
+    return JSONResponse(result)
 
-        faces = face_app.get(img)
-        if len(faces) == 0:
-            return JSONResponse({"status": "error", "message": "Không tìm thấy khuôn mặt trong ảnh!"})
-            
-        target_face = faces[0] 
-        embedding = target_face.embedding.tolist() # Convert numpy array to python list
-
-        return JSONResponse({
-            "status": "success",
-            "embedding": embedding
-        })
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

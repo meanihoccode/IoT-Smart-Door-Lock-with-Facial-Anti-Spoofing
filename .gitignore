@@ -1,4 +1,7 @@
 HELP.md
+.env
+.env.*
+!.env.example
 .gradle
 build/
 !gradle/wrapper/gradle-wrapper.jar
@@ -38,10 +41,12 @@ out/
 
 # Local runtime and dependencies
 .venv/
+.venv-mqtt/
 node_modules/
 .runtime/
 __pycache__/
 *.pyc
+
 backend-core/spring-boot-server-*/
 backend-core/*-tcplocalhost1883/
 
@@ -49,6 +54,7 @@ backend-core/*-tcplocalhost1883/
 .env
 .env.*
 !.env.example
+
 backend-core/config/application-local.properties
 esp32/config.h
 /anote.txt

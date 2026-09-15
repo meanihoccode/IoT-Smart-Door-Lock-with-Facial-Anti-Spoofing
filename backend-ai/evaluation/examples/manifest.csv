@@ -1,0 +1,7 @@
+sample_id,relative_path,subject_id,session_id,clip_id,split,presentation_type,camera_id,condition,mirrored,capture_source,frame_index,source_id,attempt_id
+enroll_p01,images/enroll_p01.jpg,p01,session01,,enrollment,live,cam01,normal,false,camera,,source01,attempt01
+probe_p01,images/probe_p01.jpg,p01,session02,,development,live,cam01,normal,false,camera,,source02,attempt02
+stranger_p02,images/stranger_p02.jpg,p02,session03,,development,live,cam01,normal,false,camera,,source03,attempt03
+print_p01,images/print_p01.jpg,p01,session02,,development,print,cam01,normal,false,camera,,source04,attempt04
+screen_p01,images/screen_p01.jpg,p01,session02,,development,screen_photo,cam01,normal,false,camera,,source05,attempt05
+replay_p01,clips/replay_p01.mp4,p01,session02,clip01,development,replay,cam01,normal,false,camera,30,source06,attempt06
