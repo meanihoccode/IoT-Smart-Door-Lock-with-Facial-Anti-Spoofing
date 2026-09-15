@@ -1,10 +1,15 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
+#if __has_include("config.h")
+#include "config.h"
+#else
+#include "config.example.h"
+#endif
 
 // --- Configuration ---
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
-const char* mqtt_server = "192.168.1.100"; // Thay bằng IP máy tính chạy Mosquitto
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
+const char* mqtt_server = MQTT_SERVER;
 
 // --- Pins ---
 const int PIR_PIN = 14;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from './api';
 import { Users, DoorOpen, ShieldCheck, Activity } from 'lucide-react';
 
 const StatCard = ({ title, value, icon: Icon, trend }) => (
@@ -31,7 +31,7 @@ const Overview = () => {
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const res = await axios.get('http://localhost:8080/api/overview');
+                const res = await axios.get('/overview');
                 setData(res.data);
             } catch (error) {
                 console.error("Lỗi khi tải dữ liệu overview:", error);

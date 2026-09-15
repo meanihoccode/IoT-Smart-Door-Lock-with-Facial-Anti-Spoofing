@@ -1,6 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import axios from 'axios';
+import axios, { errorMessage } from './api';
 import { Camera, KeyRound, ArrowLeft, ShieldCheck, Loader2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
@@ -70,7 +70,7 @@ const Kiosk = () => {
             const formData = new FormData();
             formData.append('file', blob, 'face.jpg');
 
-            const response = await axios.post('http://localhost:8080/api/verify-face', formData, {
+            const response = await axios.post('/verify-face', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
                 timeout: 25000,
             });
@@ -98,9 +98,9 @@ const Kiosk = () => {
             setStatus('SCANNING');
             setMessage('Đang xác thực mã PIN...');
             const response = await axios.post(
-                'http://localhost:8080/api/verify-pin',
+                '/verify-pin',
                 { pinCode: pin },
-                { timeout: 10000 },
+                { timeout: 10000 }
             );
             
             if (response.data.status === 'success') {
@@ -108,9 +108,13 @@ const Kiosk = () => {
                 setMessage('Mở khóa thành công');
                 scheduleReset(3000);
             }
-        } catch {
+        } catch (error) {
             setStatus('FAILED');
-            setMessage('Mã PIN không chính xác');
+            setMessage(
+                error.response?.status === 401
+                    ? 'Mã PIN không chính xác'
+                    : errorMessage(error)
+            );
             scheduleReset(5000);
         }
     };
@@ -254,6 +258,6 @@ const Kiosk = () => {
             </main>
         </div>
     );
-};
 
+};
 export default Kiosk;

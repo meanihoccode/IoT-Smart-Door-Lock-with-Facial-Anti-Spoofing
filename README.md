@@ -27,16 +27,20 @@ Dự án được chia thành 4 module độc lập:
 
 ## 🚀 Hướng Dẫn Cài Đặt
 
+Phần quản trị hiện yêu cầu đăng nhập. Xem [bàn giao đợt 1 — đăng nhập quản trị](docs/PHASE_01_ADMIN_AUTH.md) để tạo tài khoản đầu tiên, chạy kiểm thử và review các giới hạn bảo mật còn lại.
+
 ### Yêu Cầu Hệ Thống
-- Java 17+ (JDK)
-- Python 3.10+
-- Node.js 18+
+- JDK 17 (theo Gradle toolchain của repo)
+- Python 3.11 (đã kiểm tra)
+- Node.js 20.19+ thuộc nhánh 20, hoặc từ 22.12 trở lên
 - MySQL Server (Port 3306)
 - MQTT Broker (VD: Eclipse Mosquitto - Port 1883)
 
 ### 1. Database MySQL
 - Tạo một database trong MySQL với tên `btl_iot`.
-- Đảm bảo tài khoản MySQL của bạn là `root` với mật khẩu `1234` (hoặc sửa đổi trong file `backend-core/src/main/resources/application.properties` và `backend-ai/main.py`).
+- Copy `backend-ai/.env.example` thành `backend-ai/.env` và `backend-core/config/application-local.properties.example` thành `backend-core/config/application-local.properties`.
+- Điền thông tin MySQL của máy bạn trong hai file local; Java và Python phải dùng cùng database. Không sửa mật khẩu trực tiếp trong mã nguồn hoặc commit file local.
+- Hướng dẫn Windows và quy tắc cấu hình dùng chung: [SETUP_WINDOWS.md](SETUP_WINDOWS.md).
 
 ### 2. MQTT Broker
 - Cài đặt và khởi chạy Mosquitto MQTT Broker trên máy tính ở cổng `1883`.
@@ -54,7 +58,6 @@ Di chuyển vào thư mục `backend-ai` và cài đặt thư viện:
 ```bash
 cd backend-ai
 pip install -r requirements.txt
-pip install mysql-connector-python
 ```
 Chạy server AI:
 ```bash
@@ -73,7 +76,8 @@ npm run dev
 
 ### 6. Phần cứng (ESP32)
 - Mở file `esp32/main.ino` bằng Arduino IDE.
-- Đổi thông tin `YOUR_WIFI_SSID`, `YOUR_WIFI_PASSWORD` và `mqtt_server` (IP của máy tính chạy server).
+- Copy `esp32/config.example.h` thành `esp32/config.h`, điền Wi-Fi và IP MQTT của máy bạn trong file local này.
+- Có thể dùng `scripts/Compile-Esp32.ps1` để biên dịch bằng Arduino CLI; xem hướng dẫn Windows ở trên.
 - Cài các thư viện `PubSubClient` và nạp code vào board ESP32.
 
 ---

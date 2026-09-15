@@ -20,11 +20,16 @@ from face_pipeline import (
     verification_response, finish_response,
 )
 from model_runtime import load_models
+from settings import database_config
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(),
-                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 logger = logging.getLogger("face-auth")
+
 face_app = None
 anti_spoof_checker = None
 
@@ -36,15 +41,15 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title="Face Recognition API", description="AI Backend for Smart Lock", lifespan=lifespan)
+app = FastAPI(
+    title="Face Recognition API",
+    description="AI Backend for Smart Lock",
+    lifespan=lifespan
+)
 
 
 def get_db_connection():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST", "localhost"), port=int(os.getenv("DB_PORT", "3306")),
-        user=os.getenv("DB_USERNAME", "root"), password=os.getenv("DB_PASSWORD", ""),
-        database=os.getenv("DB_NAME", "btl_iot"), connection_timeout=3,
-    )
+    return mysql.connector.connect(**database_config())
 
 
 def check_database():

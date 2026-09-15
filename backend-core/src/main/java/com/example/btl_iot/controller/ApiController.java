@@ -30,7 +30,6 @@ import org.slf4j.LoggerFactory;
 
 @RestController
 @RequestMapping("/api")
-@CrossOrigin(origins = "*") // Allow requests from React frontend
 public class ApiController {
 
     private static final Logger logger = LoggerFactory.getLogger(ApiController.class);

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import axios from './api';
 import { ImagePlus, KeyRound, User, Loader2, CheckCircle2, AlertCircle, Save } from 'lucide-react';
 
 const AddUser = () => {
@@ -44,7 +44,7 @@ const AddUser = () => {
         setStatus({ type: 'info', message: 'Đang trích xuất Vector khuôn mặt...' });
 
         try {
-            const response = await axios.post('http://localhost:8080/api/register', data, {
+            const response = await axios.post('/register', data, {
                 headers: { 'Content-Type': 'multipart/form-data' }
             });
 

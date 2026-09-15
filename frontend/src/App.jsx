@@ -6,20 +6,28 @@ import Overview from './Overview';
 import AddUser from './AddUser';
 import EmployeeList from './EmployeeList';
 import './index.css';
+import { AuthProvider, ProtectedAdmin } from './Auth';
+import Login from './Login';
+import SecuritySettings from './SecuritySettings';
 
 function App() {
   return (
     <Router>
-      <Routes>
-        <Route path="/" element={<Navigate to="/kiosk" replace />} />
-        <Route path="/kiosk" element={<Kiosk />} />
-        
-        <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<Overview />} />
-          <Route path="add-user" element={<AddUser />} />
-          <Route path="users" element={<EmployeeList />} />
-        </Route>
-      </Routes>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<Navigate to="/kiosk" replace />} />
+          <Route path="/kiosk" element={<Kiosk />} />
+          <Route path="/login" element={<Login />} />
+          <Route element={<ProtectedAdmin />}>
+            <Route path="/admin" element={<AdminLayout />}>
+              <Route index element={<Overview />} />
+              <Route path="add-user" element={<AddUser />} />
+              <Route path="users" element={<EmployeeList />} />
+              <Route path="security" element={<SecuritySettings />} />
+            </Route>
+          </Route>
+        </Routes>
+      </AuthProvider>
     </Router>
   );
 }

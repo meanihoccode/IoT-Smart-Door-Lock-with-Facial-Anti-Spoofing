@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from './api';
 import { Search, MoreVertical, ShieldAlert } from 'lucide-react';
 
 const EmployeeList = () => {
@@ -8,7 +8,7 @@ const EmployeeList = () => {
     useEffect(() => {
         const fetchEmployees = async () => {
             try {
-                const res = await axios.get('http://localhost:8080/api/users');
+                const res = await axios.get('/users');
                 setEmployees(res.data);
             } catch (error) {
                 console.error("Lỗi khi tải danh sách nhân viên:", error);
