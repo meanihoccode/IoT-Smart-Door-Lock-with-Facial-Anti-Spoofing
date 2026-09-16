@@ -15,14 +15,16 @@ Bộ công cụ chạy đúng model và pipeline đang dùng trong API, nhưng n
 
 Nhờ vậy, một lượt `SPOOF_DETECTED` vẫn có thể được kiểm tra xem recognition có nhận đúng hay không, nhưng endpoint mở khóa không có tham số bỏ qua liveness.
 
+Cập nhật 15/09/2026: cả ba nhánh chọn [khuôn mặt lớn nhất](docs/LARGEST_FACE_VERIFICATION.md) giống API; `face_count` ghi tổng số mặt phát hiện. `liveness_only` chỉ chạy detector và MiniFASNet. Ảnh enrollment vẫn yêu cầu đúng một mặt. Snapshot dùng phiên bản `phase2a-largest-face-v1` để phân biệt với baseline cũ từ chối nhiều mặt.
+
 ## 2. Những file đã tạo/thay đổi
 
 | File | Vai trò |
 | --- | --- |
 | [baseline.json](backend-ai/configs/baseline.json) | Cấu hình có phiên bản cho baseline hiện tại |
-| [face_pipeline.py](backend-ai/face_pipeline.py) | Decode, kiểm tra embedding, phát hiện một mặt, liveness, cosine và quyết định dùng chung |
+| [face_pipeline.py](backend-ai/face_pipeline.py) | Decode, chọn mặt lớn nhất khi xác thực, kiểm tra embedding, liveness, cosine và quyết định dùng chung |
 | [model_runtime.py](backend-ai/model_runtime.py) | Chỉ tải model khi API khởi động hoặc CLI thực sự cần model |
-| [main.py](backend-ai/main.py) | Adapter HTTP/DB gọi pipeline dùng chung; giữ hợp đồng API giai đoạn 1 |
+| [main.py](backend-ai/main.py) | Adapter HTTP/DB gọi pipeline dùng chung; `faceCount` là tổng số mặt phát hiện |
 | [evaluate.py](backend-ai/tools/evaluate.py) | CLI kiểm tra manifest, snapshot và đánh giá |
 | [capture_dataset.py](backend-ai/tools/capture_dataset.py) | Thu từng loạt ảnh từ webcam bằng OpenCV headless |
 | [manifest.py](backend-ai/evaluation/manifest.py) | Đọc manifest, hash ảnh và phát hiện rò rỉ giữa các tập |

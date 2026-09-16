@@ -1,4 +1,4 @@
-"""HTTP/DB adapter for the shared AI pipeline. Response contract stays phase-1 compatible."""
+"""HTTP/DB adapter for the shared AI pipeline; verification selects the largest face."""
 from contextlib import asynccontextmanager
 import json
 import logging

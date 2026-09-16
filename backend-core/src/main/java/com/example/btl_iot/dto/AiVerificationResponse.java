@@ -5,7 +5,7 @@ public record AiVerificationResponse(
         String requestId,
         String reasonCode,
         String message,
-        Integer faceCount,
+        Integer faceCount, // Tổng số mặt phát hiện; liveness/recognition chỉ thuộc mặt lớn nhất.
         LivenessResult liveness,
         RecognitionResult recognition) {
 

@@ -174,9 +174,12 @@ public class ApiController {
     }
 
     private boolean isSuccessfulMatch(AiVerificationResponse result) {
+        // faceCount là tổng số mặt trong ảnh. AI chỉ xác thực mặt lớn nhất,
+        // nên ảnh có nhiều mặt vẫn hợp lệ nếu mặt được chọn vượt đủ các kiểm tra.
         return "success".equals(result.status())
                 && "FACE_VERIFIED".equals(result.reasonCode())
-                && Integer.valueOf(1).equals(result.faceCount())
+                && result.faceCount() != null
+                && result.faceCount() >= 1
                 && result.liveness() != null
                 && "PASSED".equals(result.liveness().status())
                 && Boolean.TRUE.equals(result.liveness().isReal())

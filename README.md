@@ -4,6 +4,8 @@
 
 Hệ thống cho phép mở khóa bằng mã PIN hoặc quét khuôn mặt (qua một thiết bị có camera), nhận diện người dùng thật/giả (chống dùng ảnh/video), sau đó điều khiển cửa thông qua ESP32. Đồng thời, mọi hoạt động mở cửa và quản lý người dùng đều được thống kê trên Web Dashboard.
 
+Khi quét mở khóa, AI chọn **khuôn mặt lớn nhất trong ảnh** để kiểm tra thật/giả và nhận diện. Xem [giải thích code và cách kiểm thử](docs/LARGEST_FACE_VERIFICATION.md). Ảnh đăng ký vẫn yêu cầu đúng một khuôn mặt.
+
 ## 🏗 Cấu Trúc Dự Án
 
 Dự án được chia thành 4 module độc lập:

@@ -1,6 +1,7 @@
 # Kế hoạch cải thiện độ chính xác AI xác thực khuôn mặt
 
 - Ngày lập: 11/09/2026; rà soát và điều chỉnh phạm vi: 12/09/2026.
+- Cập nhật 15/09/2026: đã triển khai [chọn khuôn mặt lớn nhất khi mở khóa](docs/LARGEST_FACE_VERIFICATION.md), đồng bộ backend-core và đánh giá offline; đăng ký vẫn chỉ nhận một mặt.
 - Mốc code lịch sử: `2f6c9664`; mức cơ sở mới là code AI sau giai đoạn 1 trong working tree hiện tại, cần chụp lại hash trước khi chạy thí nghiệm.
 - Trạng thái: giai đoạn 1 và công cụ giai đoạn 2A đã triển khai; chưa có dữ liệu gán nhãn để đo baseline và chưa có số đo chứng minh tăng độ chính xác.
 - Phạm vi thực hiện tiếp theo: `backend-ai/`, công cụ Python thu/đánh giá ảnh, cấu hình thí nghiệm và báo cáo AI.
@@ -29,8 +30,8 @@ Luồng AI hiện tại trong [main.py](backend-ai/main.py):
 ```text
 Giải mã ảnh
   → kiểm tra model sẵn sàng
-  → InsightFace phát hiện mặt và lấy embedding
-  → chỉ chấp nhận đúng một mặt, embedding 512 chiều hợp lệ
+  → InsightFace phát hiện vị trí các mặt
+  → chọn mặt lớn nhất, lấy và kiểm tra embedding 512 chiều của mặt đó
   → MiniFASNetV2: crop hiện tại → softmax → argmax
   → đọc gallery, phân biệt DB lỗi / dữ liệu hỏng / chưa đăng ký
   → so cosine với từng người, chọn điểm cao nhất với ngưỡng 0.5
@@ -40,7 +41,7 @@ Giải mã ảnh
 | Hạng mục | Trạng thái thực tế | Việc còn cần làm để cải thiện AI |
 | --- | --- | --- |
 | Model thiếu/hỏng | Đã bỏ trả `True, 0.95`; có lỗi model và đường dẫn theo module trong [anti_spoofing.py](backend-ai/anti_spoofing.py) | Giữ hành vi từ chối; bổ sung test checkpoint hỏng và suy luận lỗi |
-| Nhiều khuôn mặt | Đã trả `MULTIPLE_FACES` trước khi xét liveness/so khớp | Không đưa việc sửa `faces[0]` trở lại danh sách tồn đọng |
+| Nhiều khuôn mặt | Xác thực chỉ xét mặt lớn nhất; đăng ký vẫn trả `MULTIPLE_FACES` | Đo trên camera với nhiều người; baseline mới ghi chính sách lựa chọn trong snapshot |
 | Điểm liveness | Đã trả nhất quán `score[0][1]`, tức điểm softmax lớp real | Quyết định vẫn là `argmax`; chưa có ngưỡng hoặc vùng uncertain được hiệu chỉnh |
 | Crop liveness | Đang mở rộng thành hình vuông theo `max(w, h)`, rồi cắt cụt ở biên | Đối chiếu và sửa theo `CropImage`; đo tác động trên ảnh thực tế |
 | Nhận diện | `buffalo_l`, detection size `640×640`, cosine ngưỡng `0.5` | Chưa có báo cáo hiệu chỉnh ngưỡng cho camera/gallery của repo |
