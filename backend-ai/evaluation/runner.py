@@ -4,7 +4,7 @@ from time import perf_counter
 
 import cv2
 
-from face_pipeline import (PipelineError, decode_image, validate_embedding, elapsed_ms,
+from face_pipeline import (PipelineError, decode_image, elapsed_ms,
                            MAX_UPLOAD_BYTES)
 from evaluation.manifest import media_path, sha256_file
 from evaluation.metrics import report_metrics
@@ -51,13 +51,15 @@ def diagnostic(pipeline, image, gallery, id_to_subject, mode):
     try:
         tick = perf_counter()
         try:
-            face = pipeline.detect_one(image)
-            result["face_count"] = 1
+            # Cùng quy tắc chọn mặt với API; face_count vẫn là tổng số mặt phát hiện.
+            face, face_count = pipeline.detect_largest(image)
+            result["face_count"] = face_count
+            if mode == "recognition_only":
+                embedding = pipeline.get_embedding(image, face)
         finally:
             result["timings_ms"]["detectionAndEmbedding"] = elapsed_ms(tick)
         tick = perf_counter()
         if mode == "recognition_only":
-            embedding = validate_embedding(face.embedding)
             match, reason = pipeline.match(embedding, gallery)
             result.update(accepted=match["recognized"],
                           reason_code="RECOGNIZED" if match["recognized"] else reason,

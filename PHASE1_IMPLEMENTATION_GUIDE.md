@@ -1,6 +1,7 @@
 # Giai đoạn 1 — Các bước triển khai và giải thích
 
 - Ngày triển khai: 12/09/2026.
+- Cập nhật 15/09/2026: xác thực mở khóa đã chuyển sang [chọn mặt lớn nhất](docs/LARGEST_FACE_VERIFICATION.md); quy tắc từ chối nhiều mặt và `faceCount=1` bên dưới mô tả phiên bản giai đoạn 1. Đăng ký vẫn yêu cầu đúng một mặt.
 - Plan nguồn: [FACE_AUTH_IMPROVEMENT_PLAN.md](FACE_AUTH_IMPROVEMENT_PLAN.md).
 - Phạm vi: quan sát kết quả và xử lý lỗi an toàn.
 - Không nằm trong lần triển khai này: sửa thuật toán crop, hiệu chỉnh ngưỡng liveness/cosine, đánh giá nhiều model, chụp native resolution, đăng ký nhiều ảnh và xác thực nhiều frame.

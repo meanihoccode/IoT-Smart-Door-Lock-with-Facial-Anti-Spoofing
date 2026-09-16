@@ -1,4 +1,5 @@
 """Shared image inference. No HTTP, database, MQTT, model downloads or import-time loading."""
+from dataclasses import dataclass
 from time import perf_counter
 from uuid import uuid4
 
@@ -48,6 +49,16 @@ class InvalidTemplateError(PipelineError):
         super().__init__("INVALID_TEMPLATE")
 
 
+@dataclass
+class DetectedFace:
+    """Giữ dữ liệu của một mặt để detector, ArcFace và anti-spoofing dùng chung."""
+
+    bbox: np.ndarray  # Khung mặt [x1, y1, x2, y2] trong ảnh gốc.
+    kps: np.ndarray | None  # Các điểm mắt, mũi, miệng để ArcFace căn chỉnh mặt.
+    det_score: float  # Độ tin cậy do detector trả về, không phải điểm nhận diện.
+    embedding: np.ndarray | None = None  # Vector đặc trưng, chỉ tính sau khi chọn mặt.
+
+
 def elapsed_ms(started_at):
     return round((perf_counter() - started_at) * 1000, 2)
 
@@ -92,7 +103,7 @@ def verification_response(request_id=None):
     return {
         "status": "error", "requestId": request_id or str(uuid4()),
         "reasonCode": "INTERNAL_ERROR", "message": REASON_MESSAGES["INTERNAL_ERROR"],
-        "faceCount": 0,
+        "faceCount": 0,  # Tổng số mặt phát hiện, kể cả những mặt không được chọn.
         "liveness": {"status": "NOT_RUN", "isReal": None, "liveScore": None},
         "recognition": {
             "status": "NOT_RUN", "recognized": False, "userId": None,
@@ -114,25 +125,91 @@ def finish_response(result, reason_code, started_at):
 
 class FacePipeline:
     def __init__(self, face_app, liveness_checker):
-        self.face_app = face_app
-        self.liveness_checker = liveness_checker
+        self.face_app = face_app  # Chứa detector tìm mặt và ArcFace lấy đặc trưng.
+        self.liveness_checker = liveness_checker  # MiniFASNet kiểm tra mặt thật/giả.
 
     @property
     def liveness_ready(self):
         return self.liveness_checker is not None and self.liveness_checker.is_ready
 
-    def detect_one(self, image):
+    def detect_faces(self, image):
+        """Phát hiện vị trí các mặt một lần, chưa tính đặc trưng nhận diện."""
         if self.face_app is None:
             raise PipelineError("MODEL_UNAVAILABLE")
-        faces = self.face_app.get(image)
+
+        # max_num=0 lấy tất cả box để tự chọn theo diện tích và đếm đúng số mặt.
+        # Không dùng FaceAnalysis.get(): hàm đó chạy các model trên mọi mặt.
+        # boxes: mỗi hàng gồm [x1, y1, x2, y2, độ tin cậy].
+        # landmarks: các điểm mắt/mũi/miệng tương ứng với từng hàng của boxes.
+        boxes, landmarks = self.face_app.det_model.detect(image, max_num=0, metric="default")
+        faces = []
+        for index, box in enumerate(boxes):
+            faces.append(DetectedFace(
+                bbox=box[:4],
+                kps=landmarks[index] if landmarks is not None else None,
+                det_score=float(box[4]),
+            ))
         if not faces:
             raise PipelineError("NO_FACE")
+        return faces
+
+    def detect_one(self, image):
+        """Dùng khi đăng ký: yêu cầu đúng một mặt để tránh lưu nhầm người."""
+        faces = self.detect_faces(image)
         if len(faces) != 1:
             raise PipelineError("MULTIPLE_FACES", len(faces))
         return faces[0]
 
+    def detect_largest(self, image):
+        """Trả về (mặt lớn nhất, tổng số mặt); nếu bằng diện tích thì ưu tiên gần tâm ảnh."""
+        faces = self.detect_faces(image)
+        face_count = len(faces)
+        image_height, image_width = image.shape[:2]
+
+        selected_face = None  # Mặt tốt nhất tìm được trong vòng lặp.
+        largest_area = -1.0  # Diện tích phần box nằm trong ảnh, tính bằng pixel vuông.
+        nearest_center_distance = float("inf")  # Khoảng cách bình phương tới tâm ảnh.
+
+        for face in faces:
+            if face.bbox.shape != (4,) or not np.all(np.isfinite(face.bbox)):
+                raise PipelineError("INVALID_AI_RESPONSE", face_count)
+
+            # Chỉ giới hạn tọa độ để tính diện tích nhìn thấy. Giữ box/landmark gốc
+            # trên face để các model vẫn crop và căn chỉnh cùng khuôn mặt đã chọn.
+            x1, y1, x2, y2 = face.bbox.astype(float)
+            x1, x2 = np.clip([x1, x2], 0, image_width)
+            y1, y2 = np.clip([y1, y2], 0, image_height)
+            box_width = x2 - x1
+            box_height = y2 - y1
+            if box_width <= 0 or box_height <= 0:
+                raise PipelineError("INVALID_AI_RESPONSE", face_count)
+
+            area = box_width * box_height
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
+            center_distance = ((center_x - image_width / 2) ** 2
+                               + (center_y - image_height / 2) ** 2)
+
+            # Diện tích là tiêu chí chính; khoảng cách chỉ dùng khi bằng diện tích.
+            # Nếu cả hai tiêu chí bằng nhau, giữ mặt xuất hiện trước trong kết quả detector.
+            if (area > largest_area
+                    or (area == largest_area and center_distance < nearest_center_distance)):
+                selected_face = face
+                largest_area = area
+                nearest_center_distance = center_distance
+
+        return selected_face, face_count
+
+    def get_embedding(self, image, face):
+        """Chạy ArcFace đúng một lần cho mặt đã chọn và kiểm tra vector trả về."""
+        recognition_model = self.face_app.models["recognition"]
+        embedding = recognition_model.get(image, face)
+        return validate_embedding(embedding)
+
     def extract(self, image):
-        return validate_embedding(self.detect_one(image).embedding)
+        """Lấy đặc trưng để đăng ký, chỉ sau khi xác nhận ảnh có đúng một mặt."""
+        face = self.detect_one(image)
+        return self.get_embedding(image, face)
 
     def check_liveness(self, image, face):
         if not self.liveness_ready:
@@ -167,7 +244,11 @@ class FacePipeline:
         return recognition, "FACE_VERIFIED"
 
     def verify(self, image, gallery_loader, request_id=None):
-        """Production decision. Always requires liveness; no bypass parameter."""
+        """Xác thực mặt lớn nhất; chỉ so gallery sau khi mặt này vượt anti-spoofing.
+
+        image là ảnh BGR từ camera; gallery_loader đọc danh sách người đã đăng ký;
+        request_id giúp đối chiếu kết quả giữa AI, backend-core và log.
+        """
         started = perf_counter()
         result = verification_response(request_id)
         reason = "INTERNAL_ERROR"
@@ -176,13 +257,14 @@ class FacePipeline:
                 raise PipelineError("MODEL_UNAVAILABLE")
             tick = perf_counter()
             try:
-                face = self.detect_one(image)
-                result["faceCount"] = 1
-                embedding = validate_embedding(face.embedding)
+                face, face_count = self.detect_largest(image)
+                result["faceCount"] = face_count
+                embedding = self.get_embedding(image, face)
             finally:
                 result["timingsMs"]["detectionAndEmbedding"] = elapsed_ms(tick)
             tick = perf_counter()
             try:
+                # Dùng đúng mặt đã lấy embedding; không thử mặt khác nếu mặt này thất bại.
                 result["liveness"] = self.check_liveness(image, face)
             except PipelineError:
                 result["liveness"]["status"] = "UNAVAILABLE"

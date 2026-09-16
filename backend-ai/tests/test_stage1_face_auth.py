@@ -18,20 +18,7 @@ if str(BACKEND_AI_DIR) not in sys.path:
 
 import main
 from anti_spoofing import AntiSpoofingModel, LivenessModelUnavailableError
-
-
-class FakeFace:
-    def __init__(self, value=1.0):
-        self.bbox = np.array([20, 20, 100, 100], dtype=np.float32)
-        self.embedding = np.full(main.FACE_EMBEDDING_SIZE, value, dtype=np.float32)
-
-
-class FakeFaceApp:
-    def __init__(self, faces):
-        self.faces = faces
-
-    def get(self, _image):
-        return self.faces
+from face_fakes import FakeFace, FakeFaceApp
 
 
 class FakeLiveness:
@@ -83,18 +70,79 @@ class StageOneFaceAuthTests(unittest.TestCase):
         self.assertEqual("MODEL_UNAVAILABLE", result["reasonCode"])
         self.assertIn("requestId", result)
 
-    def test_multiple_faces_are_rejected_before_matching(self):
+    def test_multiple_faces_recognizes_only_largest_face(self):
+        small_face = FakeFace(-1.0, bbox=(40, 40, 60, 60))
+        large_face = FakeFace(1.0)
+        app = FakeFaceApp([small_face, large_face])
+        known_faces = [
+            {"id": 3, "username": "small", "embedding": small_face.embedding},
+            {"id": 7, "username": "large", "embedding": large_face.embedding},
+        ]
         with (
-            patch.object(main, "face_app", FakeFaceApp([FakeFace(), FakeFace(2.0)])),
-            patch.object(main.anti_spoof_checker, "model_loaded", True),
-            patch.object(main.anti_spoof_checker, "predict") as predict,
+            patch.object(main, "face_app", app),
+            patch.object(main.anti_spoof_checker, "predict", return_value=(True, 0.9)) as predict,
+            patch.object(main, "load_known_faces", return_value=known_faces),
+        ):
+            result = self.response_body(self.verify())
+
+        self.assertEqual("FACE_VERIFIED", result["reasonCode"])
+        self.assertEqual(2, result["faceCount"])
+        self.assertEqual(7, result["recognition"]["userId"])
+        app.det_model.detect.assert_called_once()
+        app.get.assert_not_called()
+        app.models["recognition"].get.assert_called_once()
+        np.testing.assert_array_equal(
+            large_face.bbox, app.models["recognition"].get.call_args.args[1].bbox)
+        predict.assert_called_once()
+        np.testing.assert_array_equal(large_face.bbox, predict.call_args.args[1])
+
+    def test_largest_spoof_does_not_fall_back_to_smaller_face(self):
+        small_face = FakeFace(-1.0, bbox=(40, 40, 60, 60))
+        large_face = FakeFace(1.0)
+        app = FakeFaceApp([small_face, large_face])
+        with (
+            patch.object(main, "face_app", app),
+            patch.object(main.anti_spoof_checker, "predict", return_value=(False, 0.02)) as predict,
             patch.object(main, "load_known_faces") as load_faces,
         ):
             result = self.response_body(self.verify())
 
-        self.assertEqual("MULTIPLE_FACES", result["reasonCode"])
-        predict.assert_not_called()
+        self.assertEqual("SPOOF_DETECTED", result["reasonCode"])
+        self.assertEqual(2, result["faceCount"])
+        self.assertEqual("NOT_RUN", result["recognition"]["status"])
+        predict.assert_called_once()
+        np.testing.assert_array_equal(large_face.bbox, predict.call_args.args[1])
+        app.models["recognition"].get.assert_called_once()
         load_faces.assert_not_called()
+
+    def test_unknown_largest_face_does_not_fall_back_to_known_smaller_face(self):
+        small_face = FakeFace(-1.0, bbox=(40, 40, 60, 60))
+        app = FakeFaceApp([small_face, FakeFace(1.0)])
+        with (
+            patch.object(main, "face_app", app),
+            patch.object(main, "load_known_faces", return_value=[
+                {"id": 3, "username": "small", "embedding": small_face.embedding},
+            ]),
+        ):
+            result = self.response_body(self.verify())
+
+        self.assertEqual("NOT_RECOGNIZED", result["reasonCode"])
+        self.assertEqual(2, result["faceCount"])
+        self.assertIsNone(result["recognition"]["userId"])
+        app.models["recognition"].get.assert_called_once()
+
+    def test_enrollment_multiple_faces_are_rejected_before_embedding(self):
+        app = FakeFaceApp([FakeFace(), FakeFace(bbox=(40, 40, 60, 60))])
+        with (
+            patch.object(main, "face_app", app),
+            patch.object(main.anti_spoof_checker, "predict") as predict,
+        ):
+            result = self.response_body(asyncio.run(
+                main.extract_embedding(self.request(), self.make_upload())))
+
+        self.assertEqual("MULTIPLE_FACES", result["reasonCode"])
+        app.models["recognition"].get.assert_not_called()
+        predict.assert_not_called()
 
     def test_no_face_has_explicit_reason(self):
         with (

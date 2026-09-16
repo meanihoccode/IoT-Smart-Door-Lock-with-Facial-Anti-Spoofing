@@ -1,5 +1,7 @@
 {
-  "version": "phase2a-baseline-v1",
+  "version": "phase2a-largest-face-v1",
+  "verification_face_selection": "largest_visible_area_then_center_v1",
+  "enrollment_face_selection": "exactly_one",
   "face_model": "buffalo_l",
   "detection_size": [640, 640],
   "face_context_id": -1,

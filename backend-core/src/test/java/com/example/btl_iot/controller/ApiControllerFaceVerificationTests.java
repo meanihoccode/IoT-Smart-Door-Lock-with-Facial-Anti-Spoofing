@@ -58,19 +58,20 @@ class ApiControllerFaceVerificationTests {
                 .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
-    @Test
-    void spoofResultNeverPublishesOpenCommand() {
+    @ParameterizedTest
+    @ValueSource(ints = {1, 3})
+    void spoofResultNeverPublishesOpenCommand(int faceCount) {
         respondWith("""
                 {
                   "status":"error",
                   "requestId":"req-spoof",
                   "reasonCode":"SPOOF_DETECTED",
                   "message":"Phát hiện dấu hiệu giả mạo.",
-                  "faceCount":1,
+                  "faceCount":%d,
                   "liveness":{"status":"FAILED","isReal":false,"liveScore":0.04},
                   "recognition":{"status":"NOT_RUN","recognized":false,"threshold":0.5,"gallerySize":0}
                 }
-                """);
+                """.formatted(faceCount));
 
         ResponseEntity<?> response = controller.verifyFace(faceImage);
 
@@ -170,9 +171,10 @@ class ApiControllerFaceVerificationTests {
         aiServer.verify();
     }
 
-    @Test
-    void completeSuccessWithExistingUserPublishesExactlyOnce() {
-        respondWith(successResponse("7"));
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 5})
+    void completeSuccessWithExistingUserPublishesExactlyOnce(int faceCount) {
+        respondWith(successResponse("7").replace("\"faceCount\":1", "\"faceCount\":" + faceCount));
         User user = new User();
         user.setId(7L);
         user.setFullName("Test User");
@@ -183,6 +185,20 @@ class ApiControllerFaceVerificationTests {
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(body(response).get("reasonCode")).isEqualTo("FACE_VERIFIED");
         verify(mqttPublisher).sendOpenDoorCommand();
+        aiServer.verify();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "null"})
+    void invalidFaceCountNeverPublishesOpenCommand(String faceCount) {
+        respondWith(successResponse("7").replace("\"faceCount\":1", "\"faceCount\":" + faceCount));
+
+        ResponseEntity<?> response = controller.verifyFace(faceImage);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(502);
+        assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
+        verify(userRepository, never()).findById(any());
+        verify(mqttPublisher, never()).sendOpenDoorCommand();
         aiServer.verify();
     }
 

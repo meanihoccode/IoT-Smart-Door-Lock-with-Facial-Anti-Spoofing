@@ -9,5 +9,7 @@ BASELINE = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 if (BASELINE["liveness_crop"] != "square_max_side_clipped_v1"
         or BASELINE["liveness_decision"] != "argmax_class_1"
         or BASELINE["gallery_strategy"] != "one_image_per_subject"
-        or BASELINE["quality_gate"] != "disabled"):
+        or BASELINE["quality_gate"] != "disabled"
+        or BASELINE["verification_face_selection"] != "largest_visible_area_then_center_v1"
+        or BASELINE["enrollment_face_selection"] != "exactly_one"):
     raise ValueError("Baseline configuration does not describe the implemented pipeline")

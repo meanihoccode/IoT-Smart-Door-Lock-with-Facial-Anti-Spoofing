@@ -20,20 +20,16 @@ from evaluation.manifest import ManifestError, REQUIRED, Sample, load_manifest
 from evaluation.metrics import report_metrics
 from evaluation.runner import diagnostic, empty_mode, evaluate_samples, read_sample
 from face_pipeline import FacePipeline, PipelineError, decode_image, validate_embedding
-
-
-class Face:
-    bbox = np.array([20, 20, 100, 100], dtype=np.float32)
-    embedding = np.ones(512, dtype=np.float32)
+from face_fakes import FakeFace, FakeFaceApp
 
 
 def gallery():
     return [{"id": 1, "username": "p01", "embedding": np.ones(512, dtype=np.float32)}]
 
 
-def fake_pipeline(pad_real=True):
-    app, checker = Mock(), Mock()
-    app.get.return_value = [Face()]
+def fake_pipeline(pad_real=True, faces=None):
+    app = FakeFaceApp([FakeFace()] if faces is None else faces)
+    checker = Mock()
     checker.is_ready = True
     checker.predict.return_value = (pad_real, 0.9 if pad_real else 0.02)
     return FacePipeline(app, checker)
@@ -81,13 +77,36 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(pipeline.extract(decode_image(buffer.tobytes(), "face.jpg")).tolist(), body["embedding"])
 
     def test_bad_probe_embedding_does_not_prevent_independent_pad_measurement(self):
-        pipeline = fake_pipeline()
-        face = Face()
+        face = FakeFace()
         face.embedding = np.zeros(512, np.float32)
-        pipeline.face_app.get.return_value = [face]
+        pipeline = fake_pipeline(faces=[face])
         image = np.zeros((120, 120, 3), np.uint8)
         self.assertEqual("INVALID_AI_RESPONSE", pipeline.verify(image, lambda: gallery())["reasonCode"])
         self.assertEqual("LIVE", diagnostic(pipeline, image, gallery(), {1: "p01"}, "liveness_only")["reason_code"])
+
+    def test_diagnostics_select_same_largest_face_as_production(self):
+        small_face = FakeFace(-1.0, bbox=(40, 40, 60, 60))
+        large_face = FakeFace(1.0)
+        pipeline = fake_pipeline(faces=[small_face, large_face])
+        image = np.zeros((120, 120, 3), np.uint8)
+        combined = pipeline.verify(image, gallery)
+        recognition = diagnostic(pipeline, image, gallery(), {1: "p01"}, "recognition_only")
+
+        self.assertEqual("FACE_VERIFIED", combined["reasonCode"])
+        self.assertEqual(2, combined["faceCount"])
+        self.assertEqual("p01", recognition["predicted_subject_id"])
+        self.assertEqual(2, recognition["face_count"])
+
+        # Chẩn đoán liveness chỉ cần box, không phải chạy ArcFace.
+        pipeline.face_app.models["recognition"].get.reset_mock()
+        pipeline.liveness_checker.predict.reset_mock()
+        liveness = diagnostic(pipeline, image, gallery(), {1: "p01"}, "liveness_only")
+        self.assertEqual("LIVE", liveness["reason_code"])
+        self.assertEqual(2, liveness["face_count"])
+        pipeline.face_app.models["recognition"].get.assert_not_called()
+        pipeline.liveness_checker.predict.assert_called_once()
+        np.testing.assert_array_equal(
+            large_face.bbox, pipeline.liveness_checker.predict.call_args.args[1])
 
     def test_unavailable_pad_allows_only_offline_recognition_measurement(self):
         pipeline = fake_pipeline()
