@@ -1,106 +1,115 @@
-import React, { useState, useEffect } from 'react';
-import axios from './api';
-import { Search, MoreVertical, ShieldAlert } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import api, { errorMessage } from './api';
 
-const EmployeeList = () => {
-    const [employees, setEmployees] = useState([]);
+export default function EmployeeList() {
+  const [profiles, setProfiles] = useState([]);
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState(null);
+  const [fullName, setFullName] = useState('');
+  const [pin, setPin] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
 
-    useEffect(() => {
-        const fetchEmployees = async () => {
-            try {
-                const res = await axios.get('/users');
-                setEmployees(res.data);
-            } catch (error) {
-                console.error("Lỗi khi tải danh sách nhân viên:", error);
-            }
-        };
-        fetchEmployees();
-    }, []);
-
-    const formatTime = (timeStr) => {
-        if (!timeStr || timeStr === 'Chưa từng hoạt động') return 'Chưa từng hoạt động';
-        try {
-            const date = new Date(timeStr);
-            return date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) + ' ' + date.toLocaleDateString('vi-VN');
-        } catch (e) {
-            return timeStr;
-        }
-    };
-
-    return (
-        <div className="max-w-5xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-300">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight text-gray-900">Danh Sách Nhân Viên</h2>
-                    <p className="text-sm text-gray-500 mt-1">Quản lý quyền truy cập của toàn bộ nhân viên trong công ty.</p>
-                </div>
-                
-                <div className="relative w-full sm:w-auto">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                        <Search size={16} className="text-gray-400" />
-                    </div>
-                    <input 
-                        type="text" 
-                        placeholder="Tìm kiếm nhân viên..." 
-                        className="w-full sm:w-64 pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent transition-all"
-                    />
-                </div>
-            </div>
-
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                        <thead>
-                            <tr className="bg-gray-50/50 border-b border-gray-200 text-xs uppercase tracking-wider text-gray-500 font-semibold">
-                                <th className="p-4 pl-6">Nhân Viên</th>
-                                <th className="p-4">Username</th>
-                                <th className="p-4">Phương thức</th>
-                                <th className="p-4">Trạng thái</th>
-                                <th className="p-4">Hoạt động cuối</th>
-                                <th className="p-4 text-right pr-6">Thao tác</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100">
-                            {employees.map((emp) => (
-                                <tr key={emp.id} className="hover:bg-gray-50/50 transition-colors group">
-                                    <td className="p-4 pl-6">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center font-bold text-gray-700">
-                                                {emp.name ? emp.name.charAt(0).toUpperCase() : 'U'}
-                                            </div>
-                                            <span className="font-medium text-gray-900">{emp.name}</span>
-                                        </div>
-                                    </td>
-                                    <td className="p-4 text-gray-500 text-sm">{emp.username}</td>
-                                    <td className="p-4">
-                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-blue-50 text-blue-700">
-                                            {emp.method}
-                                        </span>
-                                    </td>
-                                    <td className="p-4">
-                                        <div className="flex items-center gap-2">
-                                            <div className={`w-2 h-2 rounded-full ${emp.status === 'Active' ? 'bg-green-500' : 'bg-gray-400'}`}></div>
-                                            <span className="text-sm text-gray-600">{emp.status}</span>
-                                        </div>
-                                    </td>
-                                    <td className="p-4 text-sm text-gray-500">{formatTime(emp.lastActive)}</td>
-                                    <td className="p-4 pr-6 text-right">
-                                        <button className="p-2 text-gray-400 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors">
-                                            <MoreVertical size={16} />
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <div className="mt-6 flex items-center justify-between text-sm text-gray-500">
-                <p>Hiển thị danh sách nhân viên</p>
-            </div>
-        </div>
-    );
-};
-
-export default EmployeeList;
+  async function refresh() {
+    setEditing(null); setPin(''); setConfirmation('');
+    setLoading(true); setError('');
+    try { setProfiles((await api.get('/users')).data); }
+    catch (err) { setError(errorMessage(err)); }
+    finally { setLoading(false); }
+  }
+  useEffect(() => {
+    let active = true;
+    api.get('/users').then(({ data }) => { if (active) setProfiles(data); })
+      .catch((err) => { if (active) setError(errorMessage(err)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+  function edit(profile) {
+    setEditing(profile); setFullName(profile.name || '');
+    setPin(''); setConfirmation(''); setError(''); setMessage('');
+  }
+  function accept(updated, notice) {
+    setProfiles((current) => current.map((p) => p.id === updated.id ? updated : p));
+    setEditing(null); setMessage(notice);
+  }
+  async function save(event) {
+    event.preventDefault(); setBusy(true); setError('');
+    try {
+      const { data } = await api.patch('/users/' + editing.id, {
+        fullName, enabled: editing.enabled, version: editing.version,
+      });
+      accept(data, 'Đã cập nhật hồ sơ.');
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setBusy(false); }
+  }
+  async function toggle(profile) {
+    if (!window.confirm((profile.enabled ? 'Thu hồi' : 'Cấp lại') + ' quyền mở cửa của ' + profile.name + '?')) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const { data } = await api.patch('/users/' + profile.id, {
+        enabled: !profile.enabled, version: profile.version,
+      });
+      accept(data, data.enabled ? 'Đã cấp lại quyền ra vào.' : 'Đã thu hồi quyền mở cửa bằng cả PIN và khuôn mặt.');
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setBusy(false); }
+  }
+  async function resetPin(event) {
+    event.preventDefault(); setError('');
+    if (pin !== confirmation) { setError('Xác nhận PIN không khớp.'); return; }
+    setBusy(true);
+    try {
+      const { data } = await api.put('/users/' + editing.id + '/pin', {
+        pinCode: pin, version: editing.version,
+      });
+      accept(data, 'Đã đặt PIN mới. PIN cũ không còn dùng được; trạng thái quyền ra vào giữ nguyên.');
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setBusy(false); setPin(''); setConfirmation(''); }
+  }
+  const filtered = profiles.filter((p) => (p.username + ' ' + p.name).toLocaleLowerCase('vi').includes(query.toLocaleLowerCase('vi')));
+  const input = 'mt-1 w-full border border-gray-300 rounded-lg p-3';
+  return <div className="max-w-6xl mx-auto space-y-5">
+    <div className="flex flex-wrap justify-between gap-4">
+      <div><h2 className="text-2xl font-bold">Hồ sơ người được phép vào</h2>
+        <p className="text-sm text-gray-500 mt-1">Độc lập với tài khoản quản trị. Thu hồi quyền giữ lại hồ sơ và lịch sử ra vào.</p></div>
+      <button onClick={refresh} disabled={busy || loading} className="border rounded-lg px-4 py-2 disabled:opacity-50">Tải lại danh sách</button>
+    </div>
+    {error && <p role="alert" className="text-red-700 bg-red-50 p-3 rounded-lg">{error}</p>}
+    {message && <p role="status" className="text-green-700 bg-green-50 p-3 rounded-lg">{message}</p>}
+    <label className="block max-w-md text-sm">Tìm theo mã hồ sơ hoặc họ tên
+      <input value={query} onChange={(e) => setQuery(e.target.value)} className={input} />
+    </label>
+    {loading ? <p role="status">Đang tải hồ sơ…</p> : <div className="bg-white border rounded-xl overflow-x-auto">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-gray-50"><tr>{['Họ tên / Mã hồ sơ', 'Phương thức', 'Quyền ra vào', 'Hoạt động cuối', 'Thao tác'].map((title) => <th key={title} className="p-4">{title}</th>)}</tr></thead>
+        <tbody>{filtered.map((profile) => <tr key={profile.id} className="border-t">
+          <td className="p-4"><p className="font-medium">{profile.name}</p><p className="text-gray-500">{profile.username}</p></td>
+          <td className="p-4">{profile.method}{profile.pinResetRequired && <p className="text-amber-700">Cần đặt PIN mới hoặc chuyển đổi PIN cũ</p>}</td>
+          <td className={'p-4 ' + (profile.enabled ? 'text-green-700' : 'text-red-700')}>{profile.enabled ? 'Được phép' : 'Đã thu hồi'}</td>
+          <td className="p-4">{profile.lastActive ? new Date(profile.lastActive).toLocaleString('vi-VN') : 'Chưa hoạt động'}</td>
+          <td className="p-4"><div className="flex flex-wrap gap-2">
+            <button onClick={() => edit(profile)} disabled={busy} className="border rounded px-3 py-2 disabled:opacity-50">Sửa / Đặt PIN</button>
+            <button onClick={() => toggle(profile)} disabled={busy} className="border rounded px-3 py-2 disabled:opacity-50">{profile.enabled ? 'Thu hồi quyền' : 'Cấp lại quyền'}</button>
+          </div></td>
+        </tr>)}</tbody>
+      </table>
+      {!filtered.length && <p className="p-4 text-gray-500">Không có hồ sơ phù hợp.</p>}
+    </div>}
+    {editing && <section className="bg-white border rounded-xl p-6 space-y-5" aria-label="Chỉnh sửa hồ sơ">
+      <h3 className="text-lg font-semibold">Hồ sơ: {editing.username}</h3>
+      <p className="text-sm text-gray-500">Mã hồ sơ không đổi. Không thể xem lại PIN đã lưu; chỉ đặt PIN mới.</p>
+      <form onSubmit={save} className="max-w-md space-y-3">
+        <label className="block">Họ tên<input required maxLength={100} value={fullName} onChange={(e) => setFullName(e.target.value)} className={input} /></label>
+        <button disabled={busy} className="bg-gray-900 text-white rounded-lg px-4 py-2 disabled:opacity-50">Lưu họ tên</button>
+      </form>
+      <form onSubmit={resetPin} className="max-w-md space-y-3 border-t pt-5">
+        <label className="block">PIN mới (6–10 chữ số)<input required type="password" autoComplete="new-password" inputMode="numeric" pattern="[0-9]{6,10}" minLength={6} maxLength={10} value={pin} onChange={(e) => setPin(e.target.value)} className={input} /></label>
+        <label className="block">Xác nhận PIN<input required type="password" autoComplete="new-password" inputMode="numeric" pattern="[0-9]{6,10}" maxLength={10} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} className={input} /></label>
+        <button disabled={busy} className="bg-gray-900 text-white rounded-lg px-4 py-2 disabled:opacity-50">Đặt PIN mới</button>
+      </form>
+      <button disabled={busy} onClick={() => { setEditing(null); setPin(''); setConfirmation(''); }} className="underline">Đóng chỉnh sửa</button>
+    </section>}
+  </div>;
+}

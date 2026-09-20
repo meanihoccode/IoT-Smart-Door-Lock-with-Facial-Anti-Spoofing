@@ -2,64 +2,49 @@ import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import axios, { errorMessage } from './api';
 import { Camera, KeyRound, ArrowLeft, ShieldCheck, Loader2 } from 'lucide-react';
+import { pinCredentials } from './pin-credentials';
+import { faceFailureMessage, FACE_TIMEOUT_MS, PIN_TIMEOUT_MS, UNCERTAIN_REQUEST_MESSAGE } from './kiosk-feedback';
 import { Link } from 'react-router-dom';
-
-const FACE_ERROR_MESSAGES = {
-    NO_ENROLLMENT: 'Chưa có khuôn mặt nào được đăng ký. Hãy liên hệ quản trị viên.',
-    NO_FACE: 'Không tìm thấy khuôn mặt. Hãy nhìn thẳng vào camera và thử lại.',
-    MULTIPLE_FACES: 'Chỉ một người được đứng trước camera.',
-    LOW_QUALITY: 'Ảnh chưa đủ rõ. Hãy giữ yên và bảo đảm khuôn mặt đủ sáng.',
-    LIVENESS_UNCERTAIN: 'Chưa xác định được khuôn mặt thật. Hãy thử lại trong điều kiện sáng hơn.',
-    SPOOF_DETECTED: 'Phát hiện dấu hiệu giả mạo. Từ chối truy cập.',
-    NOT_RECOGNIZED: 'Khuôn mặt chưa được nhận diện hoặc chưa đăng ký.',
-    MODEL_UNAVAILABLE: 'Dịch vụ AI chưa sẵn sàng. Vui lòng thử lại sau.',
-    DB_UNAVAILABLE: 'Không thể đọc dữ liệu khuôn mặt. Vui lòng thử lại sau.',
-    INVALID_TEMPLATE: 'Dữ liệu khuôn mặt đăng ký đang có lỗi. Hãy liên hệ quản trị viên.',
-    INVALID_IMAGE: 'Ảnh chụp không hợp lệ. Hãy thử lại.',
-    INVALID_AI_RESPONSE: 'Kết quả AI không hợp lệ. Vui lòng thử lại sau.',
-    INTERNAL_ERROR: 'Máy chủ gặp lỗi khi xác thực. Vui lòng thử lại sau.',
-};
 
 const Kiosk = () => {
     const webcamRef = useRef(null);
-    const resetTimerRef = useRef(null);
     const [status, setStatus] = useState('IDLE'); // IDLE, SCANNING, SUCCESS, FAILED
     const [message, setMessage] = useState('Vui lòng hướng mặt vào camera');
     const [pin, setPin] = useState('');
+    const [profileCode, setProfileCode] = useState('');
+    const resetTimer = useRef(null);
+    const pending = useRef(false);
+    useEffect(() => () => clearTimeout(resetTimer.current), []);
     const [usePin, setUsePin] = useState(false);
 
     const resetState = useCallback(() => {
         setStatus('IDLE');
         setMessage('Vui lòng hướng mặt vào camera');
         setPin('');
+        setProfileCode('');
+        clearTimeout(resetTimer.current);
     }, []);
 
-    const scheduleReset = useCallback((delayMs) => {
-        if (resetTimerRef.current) {
-            clearTimeout(resetTimerRef.current);
-        }
-        resetTimerRef.current = setTimeout(() => resetState(), delayMs);
+    const scheduleReset = useCallback((delay) => {
+        clearTimeout(resetTimer.current);
+        resetTimer.current = setTimeout(resetState, delay);
     }, [resetState]);
 
-    useEffect(() => () => {
-        if (resetTimerRef.current) {
-            clearTimeout(resetTimerRef.current);
-        }
-    }, []);
-
-    const showFaceFailure = useCallback((payload, fallbackMessage) => {
-        const reasonCode = payload?.reasonCode;
+    const showFaceFailure = useCallback((payload, fallback) => {
         setStatus('FAILED');
-        setMessage(FACE_ERROR_MESSAGES[reasonCode] || payload?.message || fallbackMessage);
+        setMessage(faceFailureMessage(payload, fallback));
         scheduleReset(8000);
     }, [scheduleReset]);
 
     const captureAndVerify = useCallback(async () => {
+        if (pending.current) return;
         const imageSrc = webcamRef.current?.getScreenshot();
         if (!imageSrc) {
             showFaceFailure(null, 'Camera chưa sẵn sàng. Hãy kiểm tra quyền camera và thử lại.');
             return;
         }
+        pending.current = true;
+        clearTimeout(resetTimer.current);
 
         setStatus('SCANNING');
         setMessage('Đang xử lý...');
@@ -72,50 +57,54 @@ const Kiosk = () => {
 
             const response = await axios.post('/verify-face', formData, {
                 headers: { 'Content-Type': 'multipart/form-data' },
-                timeout: 25000,
+                timeout: FACE_TIMEOUT_MS,
             });
 
             if (response.data.status === 'success') {
                 setStatus('SUCCESS');
-                setMessage(response.data.message || 'Mở khóa thành công');
+                setMessage(response.data.message || 'Đã xác thực và gửi lệnh mở cửa.');
                 scheduleReset(3000);
             } else {
                 showFaceFailure(response.data, 'Không thể xác thực khuôn mặt.');
             }
         } catch (error) {
-            if (error.code === 'ECONNABORTED') {
-                showFaceFailure(null, 'Xác thực quá thời gian. Hãy thử lại.');
-            } else {
-                showFaceFailure(error.response?.data, 'Không thể kết nối tới máy chủ xác thực.');
-            }
+            showFaceFailure(error.response?.data,
+                !error.response ? UNCERTAIN_REQUEST_MESSAGE : 'Không thể xác thực khuôn mặt.');
+        } finally {
+            pending.current = false;
         }
     }, [showFaceFailure, scheduleReset]);
 
     const handlePinSubmit = async (e) => {
         e.preventDefault();
-        if (!pin) return;
+        if (pending.current) return;
+        let credentials;
+        try { credentials = pinCredentials(profileCode, pin); }
+        catch (error) { clearTimeout(resetTimer.current); setStatus('FAILED'); setMessage(error.message); return; }
+        pending.current = true;
+        clearTimeout(resetTimer.current);
+        setPin('');
         try {
             setStatus('SCANNING');
             setMessage('Đang xác thực mã PIN...');
-            const response = await axios.post(
-                '/verify-pin',
-                { pinCode: pin },
-                { timeout: 10000 }
-            );
+            const response = await axios.post('/verify-pin', credentials, { timeout: PIN_TIMEOUT_MS });
             
             if (response.data.status === 'success') {
                 setStatus('SUCCESS');
-                setMessage('Mở khóa thành công');
+                setMessage(response.data.message);
                 scheduleReset(3000);
+            } else {
+                setStatus('FAILED');
+                setMessage(response.data.message || 'Không thể xác thực mã hồ sơ và PIN.');
+                scheduleReset(5000);
             }
         } catch (error) {
             setStatus('FAILED');
-            setMessage(
-                error.response?.status === 401
-                    ? 'Mã PIN không chính xác'
-                    : errorMessage(error)
-            );
+            setMessage(!error.response ? UNCERTAIN_REQUEST_MESSAGE : error.response.status === 401
+                ? 'Mã hồ sơ hoặc PIN không đúng, hoặc quyền ra vào đã bị thu hồi.' : errorMessage(error));
             scheduleReset(5000);
+        } finally {
+            pending.current = false;
         }
     };
 
@@ -141,7 +130,7 @@ const Kiosk = () => {
                     {/* Header Text */}
                     <div className="text-center mb-8">
                         <h1 className="text-2xl font-bold text-gray-900 tracking-tight mb-2">Xác thực danh tính</h1>
-                        <p className="text-gray-500 text-sm">Sử dụng khuôn mặt hoặc mã PIN để mở khóa cửa.</p>
+                        <p className="text-gray-500 text-sm">Sử dụng khuôn mặt hoặc mã hồ sơ + PIN để mở khóa cửa.</p>
                     </div>
 
                     {/* Interactive Area */}
@@ -156,10 +145,9 @@ const Kiosk = () => {
                                         screenshotFormat="image/jpeg"
                                         className={`w-full h-full object-cover transition-opacity duration-300 ${status === 'SCANNING' ? 'opacity-50 grayscale' : 'opacity-100'}`}
                                         mirrored={true}
-                                        onUserMediaError={() => showFaceFailure(
-                                            null,
-                                            'Không thể truy cập camera. Hãy cấp quyền camera và tải lại trang.',
-                                        )}
+                                        onUserMediaError={() => {
+                                            if (!pending.current) showFaceFailure(null, 'Không thể truy cập camera. Hãy cấp quyền camera và tải lại trang.');
+                                        }}
                                     />
                                     
                                     {/* Focus Reticle (Minimal) */}
@@ -197,7 +185,7 @@ const Kiosk = () => {
                                         Quét khuôn mặt
                                     </button>
                                     <button 
-                                        onClick={() => setUsePin(true)}
+                                        onClick={() => { resetState(); setUsePin(true); }}
                                         disabled={status === 'SCANNING'}
                                         className="bg-white hover:bg-gray-50 text-gray-700 font-medium py-3 px-6 rounded-xl border border-gray-200 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center shadow-sm"
                                     >
@@ -212,14 +200,21 @@ const Kiosk = () => {
                                         <KeyRound size={28} />
                                     </div>
                                     
-                                    <input 
+                                    <label className="w-full text-sm text-gray-600 mb-4">Mã hồ sơ
+                                        <input required maxLength={64} pattern="[A-Za-z0-9_-]+" autoComplete="off"
+                                            value={profileCode} onChange={(e) => setProfileCode(e.target.value)}
+                                            placeholder="VD: nv001" disabled={status === 'SCANNING'}
+                                            className="w-full mt-2 border rounded-lg px-4 py-3 text-gray-900" />
+                                    </label>
+                                    <input
                                         type="password" 
+                                        aria-label="PIN riêng" required inputMode="numeric" pattern="[0-9]{6,10}" minLength={6} autoComplete="off"
                                         value={pin} 
                                         onChange={(e) => setPin(e.target.value)} 
                                         placeholder="Nhập mã PIN"
                                         className="w-full text-center text-3xl tracking-[0.5em] font-mono py-4 border-b-2 border-gray-200 focus:border-gray-900 outline-none bg-transparent transition-colors mb-8 placeholder:tracking-normal placeholder:text-gray-300 placeholder:text-lg"
                                         maxLength="10"
-                                        autoFocus
+                                        disabled={status === 'SCANNING'}
                                     />
                                     
                                     {/* Status Message Area */}
@@ -236,6 +231,7 @@ const Kiosk = () => {
                                     <div className="w-full flex gap-3">
                                         <button 
                                             type="button"
+                                            disabled={status === 'SCANNING'}
                                             onClick={() => {setUsePin(false); resetState();}}
                                             className="w-14 bg-white hover:bg-gray-50 text-gray-600 font-medium py-3 rounded-xl border border-gray-200 transition-all active:scale-[0.98] flex items-center justify-center shadow-sm"
                                         >
@@ -243,7 +239,7 @@ const Kiosk = () => {
                                         </button>
                                         <button 
                                             type="submit"
-                                            disabled={status === 'SCANNING' || !pin}
+                                            disabled={status === 'SCANNING' || !pin || !profileCode}
                                             className="flex-1 bg-gray-900 hover:bg-black text-white font-medium py-3 px-4 rounded-xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-sm"
                                         >
                                             {status === 'SCANNING' ? <Loader2 size={18} className="animate-spin" /> : 'Xác nhận'}
@@ -258,6 +254,6 @@ const Kiosk = () => {
             </main>
         </div>
     );
-
 };
+
 export default Kiosk;

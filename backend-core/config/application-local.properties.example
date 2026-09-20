@@ -14,3 +14,7 @@ SMARTLOCK_ADMIN_USERNAME=
 SMARTLOCK_ADMIN_PASSWORD=
 # Enable only behind HTTPS in deployment; leave false for local HTTP development.
 SMARTLOCK_SECURE_COOKIE=false
+
+# Phase 2: opt in ONLY after a database backup. Converts valid old PINs and clears
+# plaintext pin_code values; invalid PINs require an admin reset. Turn off after use.
+SMARTLOCK_MIGRATE_LEGACY_PINS=false

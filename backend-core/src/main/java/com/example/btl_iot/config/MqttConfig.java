@@ -25,6 +25,8 @@ public class MqttConfig {
             if (!enabled) return new MqttClient(brokerUrl, clientId,
                     new org.eclipse.paho.client.mqttv3.persist.MemoryPersistence());
             MqttClient client = new MqttClient(brokerUrl, clientId);
+            // Do not hold a profile authorization lock indefinitely waiting for the broker.
+            client.setTimeToWait(5000);
             MqttConnectOptions options = new MqttConnectOptions();
             options.setAutomaticReconnect(true);
             options.setCleanSession(true);

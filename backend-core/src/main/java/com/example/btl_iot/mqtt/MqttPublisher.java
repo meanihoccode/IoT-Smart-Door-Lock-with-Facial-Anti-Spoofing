@@ -16,24 +16,26 @@ public class MqttPublisher {
     @Value("${mqtt.topic.pub}")
     private String topicPub;
 
-    public void publishCommand(String command) {
+    public boolean publishCommand(String command) {
         if (mqttClient == null || !mqttClient.isConnected()) {
             System.err.println("MqttClient is not connected. Cannot publish: " + command);
-            return;
+            return false;
         }
         try {
-            MqttMessage message = new MqttMessage(command.getBytes());
+            MqttMessage message = new MqttMessage(command.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             message.setQos(1);
             mqttClient.publish(topicPub, message);
             System.out.println("Published command: " + command + " to topic: " + topicPub);
+            return true;
         } catch (MqttException e) {
             System.err.println("Failed to publish command: " + command);
             e.printStackTrace();
+            return false;
         }
     }
     
-    public void sendOpenDoorCommand() {
-        publishCommand("OPEN_DOOR");
+    public boolean sendOpenDoorCommand() {
+        return publishCommand("OPEN_DOOR");
     }
     
     public void sendWarningAlarmCommand() {

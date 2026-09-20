@@ -1,6 +1,7 @@
 package com.example.btl_iot.entity;
 
 import jakarta.persistence.*;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.time.LocalDateTime;
 
 @Entity
@@ -11,6 +12,17 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Version
+    @Column(nullable = false, columnDefinition = "bigint default 0")
+    private long version;
+
+    @Column(nullable = false, columnDefinition = "boolean default true")
+    private boolean enabled = true;
+
+    @JsonIgnore
+    @Column(name = "pin_hash", length = 100)
+    private String pinHash;
+
     @Column(nullable = false, unique = true)
     private String username;
 
@@ -18,11 +30,13 @@ public class User {
     private String fullName;
 
     @Column(name = "pin_code", length = 10)
+    @JsonIgnore // Legacy column: migration only, never used to authenticate.
     private String pinCode;
 
     // We can store face embedding as a JSON string, a comma-separated string, 
     // or a byte array depending on the AI model output (typically a 512-dim float array).
     @Column(name = "face_embedding", columnDefinition = "TEXT")
+    @JsonIgnore
     private String faceEmbedding;
 
     @Column(name = "created_at")
@@ -31,6 +45,11 @@ public class User {
     public User() {}
 
     public Long getId() { return id; }
+    public long getVersion() { return version; }
+    public boolean isEnabled() { return enabled; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public String getPinHash() { return pinHash; }
+    public void setPinHash(String pinHash) { this.pinHash = pinHash; }
     public void setId(Long id) { this.id = id; }
 
     public String getUsername() { return username; }
