@@ -56,8 +56,8 @@ const Overview = () => {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <StatCard title="Tổng số nhân viên" value={data.totalEmployees} icon={Users} />
-                <StatCard title="Lượt mở cửa (Hôm nay)" value={data.accessesToday} icon={DoorOpen} />
+                <StatCard title="Tổng hồ sơ ra vào" value={data.totalEmployees} icon={Users} />
+                <StatCard title="Lượt xác thực (Hôm nay)" value={data.accessesToday} icon={DoorOpen} />
                 <StatCard title="Tỷ lệ nhận diện đúng" value="--" icon={ShieldCheck} />
                 <StatCard title="Cảnh báo giả mạo" value="--" icon={Activity} />
             </div>
@@ -74,12 +74,12 @@ const Overview = () => {
                                     </div>
                                     <div>
                                         <p className="text-sm font-medium text-gray-900">{log.userName}</p>
-                                        <p className="text-xs text-gray-500">Mở khóa bằng {log.method === 'FACE' ? 'Khuôn mặt' : 'Mã PIN'}</p>
+                                        <p className="text-xs text-gray-500">Xác thực bằng {log.method === 'FACE' ? 'Khuôn mặt' : 'Mã hồ sơ + PIN'}</p>
                                     </div>
                                 </div>
                                 <div className="text-right">
                                     <span className={`text-xs font-medium px-2 py-1 rounded-full ${log.status === 'SUCCESS' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                                        {log.status === 'SUCCESS' ? 'Thành công' : 'Thất bại'}
+                                        {log.status === 'SUCCESS' ? 'Đã gửi lệnh' : log.status === 'COMMAND_FAILED' ? 'Lỗi gửi lệnh' : 'Từ chối / lỗi'}
                                     </span>
                                     <p className="text-xs text-gray-500 mt-1">{formatTime(log.time)}</p>
                                 </div>
@@ -92,8 +92,8 @@ const Overview = () => {
                     <div className="w-20 h-20 bg-green-50 rounded-full flex items-center justify-center mb-4 text-green-500">
                         <ShieldCheck size={32} />
                     </div>
-                    <h3 className="text-lg font-semibold text-gray-900">Hệ thống an toàn</h3>
-                    <p className="text-sm text-gray-500 mt-2">Server đang kết nối bình thường với thiết bị ESP32 thông qua MQTT.</p>
+                    <h3 className="text-lg font-semibold text-gray-900">Kiểm soát quyền ra vào</h3>
+                    <p className="text-sm text-gray-500 mt-2">Hồ sơ bị thu hồi quyền không được mở cửa bằng PIN hoặc khuôn mặt. Trạng thái gửi lệnh chưa xác nhận chốt cửa đã mở thực tế.</p>
                 </div>
             </div>
         </div>

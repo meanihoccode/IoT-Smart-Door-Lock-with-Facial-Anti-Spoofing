@@ -31,6 +31,10 @@ Dự án được chia thành 4 module độc lập:
 
 Phần quản trị hiện yêu cầu đăng nhập. Xem [bàn giao đợt 1 — đăng nhập quản trị](docs/PHASE_01_ADMIN_AUTH.md) để tạo tài khoản đầu tiên, chạy kiểm thử và review các giới hạn bảo mật còn lại.
 
+Đợt 2 chuyển mở cửa bằng PIN sang **mã hồ sơ + PIN**, bổ sung thu hồi quyền và PIN băm. Đọc [bàn giao đợt 2](docs/PHASE_02_PROFILES_AND_PIN.md) trước khi chạy backend trên database cũ: cần backup và chuyển đổi/đặt lại PIN; PIN plaintext cũ không được dùng để xác thực nữa.
+
+Bản tích hợp AI mới và bảo mật đợt 2: xem [các thay đổi, hợp đồng API và kiểm thử ngày 20/09/2026](docs/PHASE_02_AI_INTEGRATION.md).
+
 ### Yêu Cầu Hệ Thống
 - JDK 17 (theo Gradle toolchain của repo)
 - Python 3.11 (đã kiểm tra)

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import axios from './api';
+import React, { useEffect, useRef, useState } from 'react';
+import axios, { errorMessage } from './api';
 import { ImagePlus, KeyRound, User, Loader2, CheckCircle2, AlertCircle, Save } from 'lucide-react';
 
 const AddUser = () => {
@@ -12,6 +12,8 @@ const AddUser = () => {
     const [previewUrl, setPreviewUrl] = useState(null);
     const [status, setStatus] = useState({ type: '', message: '' });
     const [loading, setLoading] = useState(false);
+    const fileInput = useRef(null);
+    useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
 
     const handleInputChange = (e) => {
         const { name, value } = e.target;
@@ -21,6 +23,11 @@ const AddUser = () => {
     const handleFileChange = (e) => {
         const file = e.target.files[0];
         if (file) {
+            if (!['image/jpeg', 'image/png'].includes(file.type) || !file.size || file.size > 5 * 1024 * 1024) {
+                setStatus({ type: 'error', message: 'Chọn ảnh JPEG/PNG, tối đa 5 MB.' });
+                e.target.value = ''; setFormData(prev => ({ ...prev, file: null })); setPreviewUrl(null);
+                return;
+            }
             setFormData(prev => ({ ...prev, file }));
             setPreviewUrl(URL.createObjectURL(file));
         }
@@ -29,8 +36,8 @@ const AddUser = () => {
     const handleSubmit = async (e) => {
         e.preventDefault();
         
-        if (!formData.username || !formData.fullName || !formData.pinCode || !formData.file) {
-            setStatus({ type: 'error', message: 'Vui lòng điền đầy đủ thông tin và chọn ảnh hợp lệ.' });
+        if (!formData.username || !formData.fullName.trim() || !/^[0-9]{6,10}$/.test(formData.pinCode)) {
+            setStatus({ type: 'error', message: 'Điền mã hồ sơ, họ tên và PIN gồm 6–10 chữ số.' });
             return;
         }
 
@@ -38,10 +45,10 @@ const AddUser = () => {
         data.append('username', formData.username);
         data.append('fullName', formData.fullName);
         data.append('pinCode', formData.pinCode);
-        data.append('file', formData.file);
+        if (formData.file) data.append('file', formData.file);
 
         setLoading(true);
-        setStatus({ type: 'info', message: 'Đang trích xuất Vector khuôn mặt...' });
+        setStatus({ type: 'info', message: formData.file ? 'Đang trích xuất khuôn mặt và lưu hồ sơ...' : 'Đang lưu hồ sơ dùng PIN...' });
 
         try {
             const response = await axios.post('/register', data, {
@@ -52,9 +59,10 @@ const AddUser = () => {
                 setStatus({ type: 'success', message: 'Cấp quyền mở khóa thành công.' });
                 setFormData({ username: '', fullName: '', pinCode: '', file: null });
                 setPreviewUrl(null);
+                if (fileInput.current) fileInput.current.value = '';
             }
         } catch (error) {
-            const errorMsg = error.response?.data?.message || 'Có lỗi xảy ra khi kết nối tới máy chủ.';
+            const errorMsg = errorMessage(error);
             setStatus({ type: 'error', message: errorMsg });
         } finally {
             setLoading(false);
@@ -64,8 +72,8 @@ const AddUser = () => {
     return (
         <div className="max-w-2xl mx-auto">
             <div className="mb-8">
-                <h2 className="text-2xl font-bold tracking-tight text-gray-900">Thêm người dùng mới</h2>
-                <p className="text-sm text-gray-500 mt-1">Hệ thống sẽ trích xuất vector khuôn mặt và lưu trữ an toàn dưới dạng mã hóa.</p>
+                <h2 className="text-2xl font-bold tracking-tight text-gray-900">Thêm hồ sơ người được phép vào</h2>
+                <p className="text-sm text-gray-500 mt-1">PIN được băm một chiều. Có thể bỏ qua ảnh để tạo hồ sơ chỉ dùng PIN; hồ sơ này không có quyền quản trị.</p>
             </div>
 
             {status.message && (
@@ -88,7 +96,7 @@ const AddUser = () => {
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                             <div className="space-y-1.5">
                                 <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                                    Mã nhân viên (Username)
+                                    Mã hồ sơ (Username)
                                 </label>
                                 <div className="relative">
                                     <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -97,6 +105,7 @@ const AddUser = () => {
                                     <input 
                                         type="text" 
                                         name="username" 
+                                        required maxLength={64} pattern="[A-Za-z0-9_-]+"
                                         value={formData.username} 
                                         onChange={handleInputChange} 
                                         placeholder="VD: nv001"
@@ -112,6 +121,7 @@ const AddUser = () => {
                                 <input 
                                     type="text" 
                                     name="fullName" 
+                                    required maxLength={100}
                                     value={formData.fullName} 
                                     onChange={handleInputChange} 
                                     placeholder="Nguyễn Văn A"
@@ -122,7 +132,7 @@ const AddUser = () => {
 
                         <div className="space-y-1.5">
                             <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                                Mã PIN dự phòng
+                                PIN riêng (6–10 chữ số)
                             </label>
                             <div className="relative max-w-xs">
                                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -131,6 +141,7 @@ const AddUser = () => {
                                 <input 
                                     type="password" 
                                     name="pinCode" 
+                                    required minLength={6} pattern="[0-9]{6,10}" inputMode="numeric" autoComplete="new-password"
                                     value={formData.pinCode} 
                                     onChange={handleInputChange} 
                                     placeholder="••••••"
@@ -138,18 +149,19 @@ const AddUser = () => {
                                     className="w-full pl-10 pr-4 py-2.5 rounded-lg border border-gray-300 focus:border-gray-900 focus:ring-1 focus:ring-gray-900 transition-shadow outline-none tracking-widest font-mono bg-white"
                                 />
                             </div>
-                            <p className="text-xs text-gray-500">Sử dụng để mở cửa khi camera hoặc mạng có sự cố.</p>
+                            <p className="text-xs text-gray-500">Giữ nguyên số 0 ở đầu. Mở cửa bằng PIN vẫn cần kết nối tới máy chủ; chưa có chế độ offline.</p>
                         </div>
 
                         <div className="space-y-1.5 pt-2">
                             <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
-                                Dữ liệu khuôn mặt
+                                Dữ liệu khuôn mặt (không bắt buộc)
                             </label>
                             
                             <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-xl hover:bg-gray-50/50 transition-colors relative group">
                                 <input 
                                     type="file" 
-                                    accept="image/*" 
+                                    ref={fileInput}
+                                    accept="image/jpeg,image/png"
                                     onChange={handleFileChange}
                                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                                 />
@@ -173,7 +185,7 @@ const AddUser = () => {
                                                 <span className="font-medium text-gray-900 underline decoration-gray-300 underline-offset-2 cursor-pointer">Tải ảnh lên</span>
                                                 <span className="pl-1">hoặc kéo thả vào đây</span>
                                             </div>
-                                            <p className="text-xs text-gray-500">PNG, JPG, GIF up to 5MB</p>
+                                            <p className="text-xs text-gray-500">PNG/JPEG tối đa 5 MB và 4096 × 4096 pixel</p>
                                         </>
                                     )}
                                 </div>
@@ -185,7 +197,8 @@ const AddUser = () => {
                         <button 
                             type="button" 
                             className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors active:bg-gray-100"
-                            onClick={() => {setFormData({ username: '', fullName: '', pinCode: '', file: null }); setPreviewUrl(null);}}
+                            disabled={loading}
+                            onClick={() => {setFormData({ username: '', fullName: '', pinCode: '', file: null }); setPreviewUrl(null); if (fileInput.current) fileInput.current.value = '';}}
                         >
                             Hủy
                         </button>

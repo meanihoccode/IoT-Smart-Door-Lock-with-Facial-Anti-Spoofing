@@ -61,7 +61,7 @@ const AdminLayout = () => {
                         }`}
                     >
                         <Users size={18} className={isActive('/admin/users') ? 'text-gray-700' : 'text-gray-400'} />
-                        Danh sách nhân viên
+                        Hồ sơ ra vào
                     </Link>
                 </nav>
 
@@ -81,7 +81,7 @@ const AdminLayout = () => {
                 {/* Header */}
                 <header className="h-16 bg-white border-b border-gray-200 flex items-center px-8 justify-between shrink-0">
                     <h1 className="text-lg font-semibold text-gray-800">
-                        {isActive('/admin/security') ? 'Bảo mật tài khoản' : isActive('/admin') ? 'Tổng Quan' : isActive('/admin/add-user') ? 'Cấp Quyền Truy Cập' : 'Danh Sách Nhân Viên'}
+                        {isActive('/admin/security') ? 'Bảo mật tài khoản' : isActive('/admin') ? 'Tổng Quan' : isActive('/admin/add-user') ? 'Cấp Quyền Truy Cập' : 'Hồ Sơ Ra Vào'}
                     </h1>
                     <div className="flex items-center gap-4">
                         <span className="text-sm">{user.username}</span>
