@@ -27,7 +27,8 @@ public class SecurityConfig {
         provider.setPasswordEncoder(encoder);
         return new ProviderManager(provider);
     }
-    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, AdminAccountRepository admins) throws Exception {
+    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, AdminAccountRepository admins,
+            AdminSessionPolicy sessions, com.example.btl_iot.repository.SecurityAuditRepository audits) throws Exception {
         http
             .csrf(csrf -> csrf.csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
@@ -37,7 +38,7 @@ public class SecurityConfig {
             .logout(logout -> logout.disable())
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/verify-pin", "/api/verify-face").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/kiosk", "/api/verify-pin", "/api/verify-face").permitAll()
                 .requestMatchers("/api/auth/**", "/api/admin/**", "/api/register", "/api/users", "/api/users/**", "/api/overview").hasRole("ADMIN")
                 .anyRequest().denyAll())
             .exceptionHandling(errors -> errors
@@ -49,7 +50,7 @@ public class SecurityConfig {
                     res.setStatus(403); res.setContentType("application/json;charset=UTF-8");
                     res.getWriter().write("{\"status\":\"error\",\"message\":\"Không được phép hoặc phiên bảo mật đã hết hạn.\"}");
                 }))
-            .addFilterAfter(new AdminSessionFilter(admins), SecurityContextHolderFilter.class);
+            .addFilterAfter(new AdminSessionFilter(admins, sessions, audits), SecurityContextHolderFilter.class);
         return http.build();
     }
 }

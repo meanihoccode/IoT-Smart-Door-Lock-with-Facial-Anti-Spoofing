@@ -28,9 +28,11 @@ public class AuthController {
     private final SecurityAuditRepository audits;
     private final AttemptLimiter limiter;
     private final PasswordEncoder encoder;
+    private final AdminSessionPolicy sessions;
     public AuthController(AuthenticationManager manager, AdminAccountRepository admins, SecurityAuditRepository audits,
-                          AttemptLimiter limiter, PasswordEncoder encoder) {
+                          AttemptLimiter limiter, PasswordEncoder encoder, AdminSessionPolicy sessions) {
         this.manager=manager; this.admins=admins; this.audits=audits; this.limiter=limiter; this.encoder=encoder;
+        this.sessions=sessions;
     }
     @GetMapping("/csrf")
     public Map<String,String> csrf(CsrfToken token) {
@@ -56,6 +58,7 @@ public class AuthController {
         context.setAuthentication(auth);
         SecurityContextHolder.setContext(context);
         new HttpSessionSecurityContextRepository().saveContext(context,request,response);
+        sessions.start(request.getSession());
         limiter.clear(accountKey);
         audits.save(new SecurityAudit(auth.getName(),"LOGIN_SUCCESS",null));
         return Map.of("username",auth.getName(),"role","ADMIN");
@@ -64,8 +67,16 @@ public class AuthController {
     public Map<String,String> me(Authentication auth) { return Map.of("username",auth.getName(),"role","ADMIN"); }
     @PostMapping("/logout")
     public Map<String,String> logout(Authentication auth,HttpServletRequest request,HttpServletResponse response) {
-        audits.save(new SecurityAudit(auth.getName(),"LOGOUT",null));
-        new SecurityContextLogoutHandler().logout(request,response,auth);
+        try { audits.save(new SecurityAudit(auth.getName(),"LOGOUT",null)); }
+        finally { new SecurityContextLogoutHandler().logout(request,response,auth); }
+        return Map.of("status","success");
+    }
+    @PostMapping("/kiosk")
+    public Map<String,String> kiosk(Authentication auth,HttpServletRequest request,HttpServletResponse response) {
+        try {
+            if (auth != null && auth.getPrincipal() instanceof AdminPrincipal)
+                audits.save(new SecurityAudit(auth.getName(),"KIOSK_HANDOFF",null));
+        } finally { new SecurityContextLogoutHandler().logout(request,response,auth); }
         return Map.of("status","success");
     }
     @PostMapping("/password")
