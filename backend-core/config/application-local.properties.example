@@ -18,3 +18,7 @@ SMARTLOCK_SECURE_COOKIE=false
 # Phase 2: opt in ONLY after a database backup. Converts valid old PINs and clears
 # plaintext pin_code values; invalid PINs require an admin reset. Turn off after use.
 SMARTLOCK_MIGRATE_LEGACY_PINS=false
+
+# Phase 3: server-enforced admin idle and absolute session lifetimes.
+SMARTLOCK_ADMIN_IDLE_TIMEOUT=15m
+SMARTLOCK_ADMIN_ABSOLUTE_TIMEOUT=4h

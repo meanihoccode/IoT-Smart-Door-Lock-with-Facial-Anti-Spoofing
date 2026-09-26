@@ -290,6 +290,40 @@ class BtlIotApplicationTests {
         assertEquals(502,browser.multipart("/register",Map.of("username","one","fullName","One","pinCode","123456"),true).statusCode());
         assertEquals(0,users.count()); verifyNoInteractions(mqtt);
     }
+    @Test void kioskHandoffRevokesAdminAndRequiresCsrf() throws Exception {
+        var browser = new Browser(); browser.login();
+        assertEquals(403,browser.post("/auth/kiosk",Map.of(),null).statusCode());
+        assertEquals(200,browser.get("/auth/me").statusCode());
+        assertEquals(200,browser.post("/auth/kiosk",Map.of(),browser.csrf()).statusCode());
+        assertEquals(401,browser.get("/auth/me").statusCode());
+        assertEquals(401,browser.get("/admin/security-audits").statusCode());
+        assertTrue(audits.findAll().stream().anyMatch(a -> a.getAction().equals("KIOSK_HANDOFF")));
+        assertEquals(200,browser.post("/auth/kiosk",Map.of(),browser.csrf()).statusCode());
+    }
+    @Test void auditIsAdminOnlyReadOnlyAndDoesNotExposeSecrets() throws Exception {
+        var browser = new Browser(); assertEquals(401,browser.get("/admin/security-audits").statusCode());
+        browser.login();
+        var response = browser.get("/admin/security-audits"); assertEquals(200,response.statusCode());
+        var body = json.readTree(response.body()); assertTrue(body.path("totalElements").asLong() > 0);
+        for (String secret : new String[]{PASSWORD,"passwordHash","pinHash","JSESSIONID","faceEmbedding"}) assertFalse(response.body().contains(secret));
+        assertEquals(405,browser.post("/admin/security-audits",Map.of(),browser.csrf()).statusCode());
+    }
+    @Test void auditSupportsExactFiltersStablePagesAndInclusiveDates() throws Exception {
+        var browser = new Browser(); browser.login();
+        for (int i=0;i<3;i++) audits.save(new com.example.btl_iot.entity.SecurityAudit("profile-admin","PROFILE_UPDATED",String.valueOf(i)));
+        String today = java.time.LocalDate.now().toString();
+        String filter = "/admin/security-audits?actor=profile-admin&action=PROFILE_UPDATED&from="+today+"&to="+today+"&size=2";
+        var first = json.readTree(browser.get(filter).body()); var second = json.readTree(browser.get(filter+"&page=1").body());
+        assertEquals(3,first.path("totalElements").asInt()); assertEquals(2,first.path("items").size());
+        assertEquals(1,second.path("items").size());
+        assertNotEquals(first.path("items").get(0).path("id"),second.path("items").get(0).path("id"));
+        assertEquals(0,json.readTree(browser.get("/admin/security-audits?actor=missing").body()).path("totalElements").asInt());
+    }
+    @Test void invalidAuditFiltersAreRejected() throws Exception {
+        var browser = new Browser(); browser.login();
+        for (String query : new String[]{"page=-1","size=101","size=0","from=bad","from=2026-02-02&to=2026-02-01","action=invalid"})
+            assertEquals(400,browser.get("/admin/security-audits?"+query).statusCode(),query);
+    }
 
     @Test void aiReasonAndCorrelationSurviveHttpAndAreAudited() throws Exception {
         when(faces.identify(any())).thenReturn(FaceGateway.FaceMatch.rejected("MODEL_UNAVAILABLE", "request-http-test"));
