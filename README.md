@@ -35,6 +35,8 @@ Phần quản trị hiện yêu cầu đăng nhập. Xem [bàn giao đợt 1 —
 
 Bản tích hợp AI mới và bảo mật đợt 2: xem [các thay đổi, hợp đồng API và kiểm thử ngày 20/09/2026](docs/PHASE_02_AI_INTEGRATION.md).
 
+Đợt 3 bổ sung bàn giao Kiosk có đăng xuất, giới hạn phiên admin và trang nhật ký bảo mật. Xem [tài liệu phase 3 và checklist review](docs/PHASE_03_ADMIN_SESSION_AND_AUDIT.md).
+
 ### Yêu Cầu Hệ Thống
 - JDK 17 (theo Gradle toolchain của repo)
 - Python 3.11 (đã kiểm tra)

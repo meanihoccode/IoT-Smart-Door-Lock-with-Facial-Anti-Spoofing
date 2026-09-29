@@ -14,6 +14,10 @@ import java.util.Map;
 
 @RestControllerAdvice
 public class ApiErrors {
+    @ExceptionHandler(org.springframework.web.HttpRequestMethodNotSupportedException.class)
+    ResponseEntity<?> methodNotAllowed() {
+        return ResponseEntity.status(405).body(Map.of("status","error","message","Thao tác này không được hỗ trợ."));
+    }
     @ExceptionHandler(com.example.btl_iot.service.FaceGateway.AiFailure.class)
     ResponseEntity<?> ai(com.example.btl_iot.service.FaceGateway.AiFailure ex) {
         var body = new java.util.HashMap<String, Object>();
