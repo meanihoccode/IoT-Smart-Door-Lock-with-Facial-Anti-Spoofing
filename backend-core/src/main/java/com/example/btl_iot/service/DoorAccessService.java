@@ -21,32 +21,58 @@ public class DoorAccessService {
     private final MqttPublisher mqtt;
     private final PasswordEncoder encoder;
     private final AttemptLimiter limiter;
+    private final DoorStateService doorState;
     private final String dummyHash;
     public DoorAccessService(UserRepository users, AccessLogRepository logs, SecurityAuditRepository audits,
-                             MqttPublisher mqtt, PasswordEncoder encoder, AttemptLimiter limiter) {
+                             MqttPublisher mqtt, PasswordEncoder encoder, AttemptLimiter limiter,
+                             DoorStateService doorState) {
         this.users = users; this.logs = logs; this.audits = audits; this.mqtt = mqtt;
-        this.encoder = encoder; this.limiter = limiter;
+        this.encoder = encoder; this.limiter = limiter; this.doorState = doorState;
         dummyHash = encoder.encode("not-a-valid-numeric-pin");
     }
     @Transactional
     public Result pin(String username, String pin, String ip) {
-        InputRules.username(username); ProfileRules.pin(pin);
-        limiter.consume("pin:ip:" + ip, 20, Duration.ofMinutes(5));
-        String key = "pin:user:" + username.toLowerCase(Locale.ROOT);
-        // Acquire the row before checking the secret. Revocation/reset uses the same row lock.
-        User user = users.findLockedByUsername(username).orElse(null);
-        int attempt = limiter.consume(key, 3, Duration.ofMinutes(5));
-        String hash = user == null || user.getPinHash() == null ? dummyHash : user.getPinHash();
-        boolean matches = encoder.matches(pin, hash);
-        if (!matches || user == null || !user.isEnabled()) {
-            if (attempt == 3) audits.save(new SecurityAudit(username, "PIN_THROTTLED", user == null ? null : user.getId().toString()));
-            return denied(user, "PIN", "FAILED");
+        if (doorState.isEmergencyLockdown()) {
+            return new Result(403, "error", "Cửa đang bị vô hiệu hóa khẩn cấp bởi Quản trị viên.");
         }
-        limiter.clear(key);
-        return open(user, "PIN");
+        ProfileRules.pin(pin);
+        limiter.consume("pin:ip:" + ip, 20, Duration.ofMinutes(5));
+
+        if (username != null && !username.isBlank()) {
+            InputRules.username(username);
+            String key = "pin:user:" + username.toLowerCase(Locale.ROOT);
+            // Acquire the row before checking the secret. Revocation/reset uses the same row lock.
+            User user = users.findLockedByUsername(username).orElse(null);
+            int attempt = limiter.consume(key, 3, Duration.ofMinutes(5));
+            String hash = user == null || user.getPinHash() == null ? dummyHash : user.getPinHash();
+            boolean matches = encoder.matches(pin, hash);
+            if (!matches || user == null || !user.isEnabled()) {
+                if (attempt == 3) audits.save(new SecurityAudit(username, "PIN_THROTTLED", user == null ? null : user.getId().toString()));
+                return denied(user, "PIN", "FAILED");
+            }
+            limiter.clear(key);
+            return open(user, "PIN");
+        } else {
+            // Phương án A: Chỉ nhập mã PIN trực tiếp (không cần username)
+            var enabledUsers = users.findAll().stream().filter(User::isEnabled).toList();
+            User matchedUser = null;
+            for (User u : enabledUsers) {
+                if (u.getPinHash() != null && encoder.matches(pin, u.getPinHash())) {
+                    matchedUser = u;
+                    break;
+                }
+            }
+            if (matchedUser == null) {
+                return denied(null, "PIN", "FAILED");
+            }
+            return open(matchedUser, "PIN");
+        }
     }
     @Transactional
     public Result face(FaceGateway.FaceMatch match) {
+        if (doorState.isEmergencyLockdown()) {
+            return new Result(403, "error", "Cửa đang bị vô hiệu hóa khẩn cấp bởi Quản trị viên.");
+        }
         if (!"FACE_VERIFIED".equals(match.reasonCode()) || match.spoof()) {
             String reason = match.spoof() ? "SPOOF_DETECTED" : match.reasonCode();
             record(null, "FACE", reason);
@@ -75,6 +101,9 @@ public class DoorAccessService {
         boolean sent = mqtt.sendOpenDoorCommand();
         log.setStatus(sent ? "SUCCESS" : "COMMAND_FAILED");
         logs.save(log);
+        if (sent) {
+            doorState.notifyDoorUnlocked(method, "Mở cửa thành công: " + (user != null ? user.getFullName() : "Ngoại tuyến"));
+        }
         return sent ? new Result(200, "success", "Đã xác thực và gửi lệnh mở cửa.")
                 : new Result(503, "error", "Đã xác thực nhưng chưa xác nhận được việc gửi lệnh. Kiểm tra trạng thái cửa và kết nối thiết bị.");
     }

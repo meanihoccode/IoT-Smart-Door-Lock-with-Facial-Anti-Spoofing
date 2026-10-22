@@ -1,6 +1,8 @@
 package com.example.btl_iot.repository;
 
 import com.example.btl_iot.entity.AccessLog;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -14,6 +16,8 @@ public interface AccessLogRepository extends JpaRepository<AccessLog, Long> {
     
     List<AccessLog> findTop5ByOrderByAccessTimeDesc();
     
+    Page<AccessLog> findAllByOrderByAccessTimeDesc(Pageable pageable);
+
     @Query("SELECT MAX(a.accessTime) FROM AccessLog a WHERE a.user.id = :userId")
     LocalDateTime findLastAccessTimeByUserId(@Param("userId") Long userId);
 }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { UserPlus, LogOut, LayoutDashboard, Users, ShieldCheck, Settings } from 'lucide-react';
+import { UserPlus, LogOut, LayoutDashboard, Users, ShieldCheck, ShieldAlert, Settings } from 'lucide-react';
 import { useAuth } from './auth-context';
 import { errorMessage } from './api';
 
@@ -45,6 +45,16 @@ const AdminLayout = () => {
                     </Link>
                     
                     <Link 
+                        to="/admin/alerts" 
+                        className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                            isActive('/admin/alerts') ? 'bg-red-50 text-red-700 font-semibold' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }`}
+                    >
+                        <ShieldAlert size={18} className={isActive('/admin/alerts') ? 'text-red-600' : 'text-gray-400'} />
+                        Cảnh báo an ninh
+                    </Link>
+
+                    <Link 
                         to="/admin/add-user" 
                         className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                             isActive('/admin/add-user') ? 'bg-gray-100 text-gray-900' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
@@ -65,14 +75,38 @@ const AdminLayout = () => {
                     </Link>
                 </nav>
 
-                <div className="p-4 border-t border-gray-100">
-                    <Link to="/admin/audit" className="block px-3 py-2.5 text-sm">Nhật ký bảo mật</Link>
-                    <Link to="/admin/security" className="block px-3 py-2.5 text-sm">Đổi mật khẩu</Link>
-                    <button onClick={handleLogout} disabled={loggingOut} className="flex items-center gap-3 px-3 py-2.5 text-sm disabled:opacity-50"><LogOut size={18} />{loggingOut ? 'Đang đăng xuất…' : 'Đăng xuất'}</button>
-                    {logoutError && <p role="alert" className="text-sm text-red-700">{logoutError}</p>}
-                    <Link to="/kiosk" className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-colors">
-                        <LogOut size={18} />
-                        Đăng xuất và về Kiosk
+                <div className="p-4 border-t border-gray-100 space-y-1">
+                    <Link 
+                        to="/admin/audit" 
+                        className={`block px-3 py-2 text-sm rounded-lg transition-colors ${
+                            isActive('/admin/audit') ? 'bg-gray-100 text-gray-900 font-semibold' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }`}
+                    >
+                        Nhật ký an ninh
+                    </Link>
+                    <Link 
+                        to="/admin/security" 
+                        className={`block px-3 py-2 text-sm rounded-lg transition-colors ${
+                            isActive('/admin/security') ? 'bg-gray-100 text-gray-900 font-semibold' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }`}
+                    >
+                        Đổi mật khẩu
+                    </Link>
+                    <button 
+                        onClick={handleLogout} 
+                        disabled={loggingOut} 
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+                    >
+                        <LogOut size={16} />
+                        {loggingOut ? 'Đang đăng xuất…' : 'Đăng xuất'}
+                    </button>
+                    {logoutError && <p role="alert" className="text-xs text-red-700 px-3">{logoutError}</p>}
+                    <Link 
+                        to="/kiosk" 
+                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-colors border-t border-gray-100 pt-3"
+                    >
+                        <LogOut size={16} />
+                        Về màn hình Kiosk
                     </Link>
                 </div>
             </aside>
@@ -82,20 +116,24 @@ const AdminLayout = () => {
                 {/* Header */}
                 <header className="h-16 bg-white border-b border-gray-200 flex items-center px-8 justify-between shrink-0">
                     <h1 className="text-lg font-semibold text-gray-800">
-                        {isActive('/admin/audit') ? 'Nhật ký bảo mật' : isActive('/admin/security') ? 'Bảo mật tài khoản' : isActive('/admin') ? 'Tổng Quan' : isActive('/admin/add-user') ? 'Cấp Quyền Truy Cập' : 'Hồ Sơ Ra Vào'}
+                        {isActive('/admin/alerts') ? 'Cảnh Báo An Ninh & Khóa Khẩn Cấp' :
+                         isActive('/admin/audit') ? 'Nhật Ký An Ninh' : 
+                         isActive('/admin/security') ? 'Bảo Mật Tài Khoản' : 
+                         isActive('/admin') ? 'Tổng Quan' : 
+                         isActive('/admin/add-user') ? 'Cấp Quyền Truy Cập' : 'Hồ Sơ Ra Vào'}
                     </h1>
                     <div className="flex items-center gap-4">
-                        <span className="text-sm">{user.username}</span>
+                        <span className="text-sm font-medium text-gray-700">{user.username}</span>
                         <Link to="/admin/security" aria-label="Bảo mật tài khoản" className="text-gray-400 hover:text-gray-600 transition-colors">
                             <Settings size={20} />
                         </Link>
-                        <div className="w-8 h-8 rounded-full bg-gray-200 border border-gray-300 flex items-center justify-center text-sm font-medium text-gray-600 cursor-pointer hover:bg-gray-300 transition-colors">
-                            A
+                        <div className="w-8 h-8 rounded-full bg-gray-900 text-white flex items-center justify-center text-xs font-bold shadow-sm">
+                            {user.username ? user.username.charAt(0).toUpperCase() : 'A'}
                         </div>
                     </div>
                 </header>
 
-                {/* Page Content (Outlet renders the matched child route) */}
+                {/* Page Content */}
                 <div className="flex-1 overflow-auto p-8">
                     <Outlet />
                 </div>
