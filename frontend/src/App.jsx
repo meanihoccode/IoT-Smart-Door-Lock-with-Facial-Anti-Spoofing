@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import KioskGate from './KioskGate';
 import SecurityAudit from './SecurityAudit';
+import SecurityAlerts from './SecurityAlerts';
 import AdminLayout from './AdminLayout';
 import Overview from './Overview';
 import AddUser from './AddUser';
@@ -22,6 +23,7 @@ function App() {
           <Route element={<ProtectedAdmin />}>
             <Route path="/admin" element={<AdminLayout />}>
               <Route index element={<Overview />} />
+              <Route path="alerts" element={<SecurityAlerts />} />
               <Route path="add-user" element={<AddUser />} />
               <Route path="users" element={<EmployeeList />} />
               <Route path="security" element={<SecuritySettings />} />

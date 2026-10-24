@@ -8,6 +8,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.HashMap;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -73,7 +75,7 @@ public class ApiController {
             if (log.getUser() != null) {
                 logData.put("userName", log.getUser().getFullName());
             } else {
-                logData.put("userName", "Unknown");
+                logData.put("userName", "Khách / Ngoại tuyến");
             }
             recentLogsData.add(logData);
         }
@@ -85,5 +87,36 @@ public class ApiController {
         ));
     }
 
+    @GetMapping("/admin/access-logs")
+    public ResponseEntity<?> getAccessLogs(@RequestParam(defaultValue = "0") int page,
+                                          @RequestParam(defaultValue = "20") int size) {
+        Page<AccessLog> logPage = accessLogRepository.findAllByOrderByAccessTimeDesc(PageRequest.of(page, size));
+        java.util.List<Map<String, Object>> items = new java.util.ArrayList<>();
+        for (AccessLog log : logPage.getContent()) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("id", log.getId());
+            item.put("time", log.getAccessTime().toString());
+            item.put("method", log.getAccessMethod());
+            item.put("status", log.getStatus());
+            if (log.getUser() != null) {
+                item.put("userName", log.getUser().getFullName());
+                item.put("username", log.getUser().getUsername());
+            } else if (log.getAccessMethod() != null && log.getAccessMethod().startsWith("OFFLINE_")) {
+                item.put("userName", "Mở khóa ngoại tuyến (Master PIN / Nút cơ)");
+                item.put("username", "OFFLINE");
+            } else {
+                item.put("userName", "Khách / Không xác định");
+                item.put("username", "—");
+            }
+            item.put("imageUrl", log.getImageUrl());
+            items.add(item);
+        }
 
+        return ResponseEntity.ok(Map.of(
+            "items", items,
+            "page", logPage.getNumber(),
+            "totalPages", logPage.getTotalPages(),
+            "totalElements", logPage.getTotalElements()
+        ));
+    }
 }

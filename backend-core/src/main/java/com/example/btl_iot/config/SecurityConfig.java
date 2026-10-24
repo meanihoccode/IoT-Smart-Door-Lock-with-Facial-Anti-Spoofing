@@ -30,7 +30,16 @@ public class SecurityConfig {
     @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, AdminAccountRepository admins,
             AdminSessionPolicy sessions, com.example.btl_iot.repository.SecurityAuditRepository audits) throws Exception {
         http
-            .csrf(csrf -> csrf.csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+            .csrf(csrf -> csrf
+                .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
+                .ignoringRequestMatchers(
+                    "/api/verify-pin",
+                    "/api/verify-face",
+                    "/api/security-alerts",
+                    "/api/security-alerts/images/**",
+                    "/api/lockdown/status",
+                    "/api/door-status"
+                ))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
             .requestCache(cache -> cache.disable())
             .formLogin(form -> form.disable())
@@ -39,7 +48,20 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/kiosk", "/api/verify-pin", "/api/verify-face").permitAll()
-                .requestMatchers("/api/auth/**", "/api/admin/**", "/api/register", "/api/users", "/api/users/**", "/api/overview").hasRole("ADMIN")
+                .requestMatchers(HttpMethod.POST, "/api/security-alerts").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/security-alerts/images/**").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/lockdown/status", "/api/door-status").permitAll()
+                .requestMatchers(
+                    "/api/auth/**",
+                    "/api/admin/**",
+                    "/api/register",
+                    "/api/users",
+                    "/api/users/**",
+                    "/api/overview",
+                    "/api/security-alerts",
+                    "/api/security-alerts/**",
+                    "/api/lockdown/toggle"
+                ).hasRole("ADMIN")
                 .anyRequest().denyAll())
             .exceptionHandling(errors -> errors
                 .authenticationEntryPoint((req, res, ex) -> {

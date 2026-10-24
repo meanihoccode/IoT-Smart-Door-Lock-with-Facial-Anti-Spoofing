@@ -58,3 +58,7 @@ backend-core/*-tcplocalhost1883/
 backend-core/config/application-local.properties
 esp32/config.h
 /anote.txt
+
+esp32/**/config.h
+backend-core/uploads/**
+!backend-core/uploads/.gitkeep
