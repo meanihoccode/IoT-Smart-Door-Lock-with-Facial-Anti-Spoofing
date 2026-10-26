@@ -1,0 +1,109 @@
+# IoT Level 3 cloud stack on one VM (D07 proposal). Only 80/443 (HTTPS app/API) and 8883 (MQTT TLS) are published.
+# DB, AI and Core sit on an internal network with no route to the internet and no published ports.
+# Usage: see deploy/README.md. Secrets come from deploy/.env (never committed).
+name: smartlock
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set in .env}
+      MYSQL_USER: ${MYSQL_USER:?set in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in .env}
+    volumes:
+      - db-data:/var/lib/mysql
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ai:
+    build: ../backend-ai
+    restart: unless-stopped
+    environment:
+      SMARTLOCK_DB_HOST: db
+      SMARTLOCK_DB_PORT: "3306"
+      SMARTLOCK_DB_NAME: ${MYSQL_DATABASE}
+      SMARTLOCK_DB_USER: ${MYSQL_USER}
+      SMARTLOCK_DB_PASSWORD: ${MYSQL_PASSWORD}
+      SMARTLOCK_INSIGHTFACE_ROOT: /models/insightface
+    volumes:
+      # Host directory containing models/buffalo_l/*.onnx (provisioned manually; see README).
+      - ${INSIGHTFACE_MODELS_DIR:?set in .env}:/models/insightface:ro
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+
+  core:
+    build: ../backend-core
+    restart: unless-stopped
+    environment:
+      SMARTLOCK_DB_HOST: db
+      SMARTLOCK_DB_PORT: "3306"
+      SMARTLOCK_DB_NAME: ${MYSQL_DATABASE}
+      SMARTLOCK_DB_USER: ${MYSQL_USER}
+      SMARTLOCK_DB_PASSWORD: ${MYSQL_PASSWORD}
+      SMARTLOCK_DB_ALLOW_PUBLIC_KEY_RETRIEVAL: "false"
+      SMARTLOCK_AI_URL: http://ai:8000/api/
+      # Private, password-protected listener on the internal network; devices use TLS on 8883.
+      SMARTLOCK_MQTT_BROKER_URL: tcp://mosquitto:1883
+      SMARTLOCK_MQTT_USERNAME: core
+      SMARTLOCK_MQTT_PASSWORD: ${MQTT_CORE_PASSWORD:?set in .env}
+      SMARTLOCK_MQTT_CLIENT_ID: smartlock-core
+      SMARTLOCK_DEVICE_ID: ${DEVICE_ID:-door-01}
+      SMARTLOCK_DEVICE_TOKEN_SHA256: ${DEVICE_TOKEN_SHA256:?set in .env}
+      SMARTLOCK_ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      SMARTLOCK_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SMARTLOCK_SECURE_COOKIE: "true"
+      SMARTLOCK_FORWARD_HEADERS: native
+      SMARTLOCK_ALERTS_DIR: /data/alerts
+    volumes:
+      - alerts:/data/alerts
+    networks: [backend]
+    depends_on:
+      db: { condition: service_healthy }
+      mosquitto: { condition: service_started }
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    restart: unless-stopped
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/certs:/mosquitto/certs:ro
+      - mqtt-data:/mosquitto/data
+    networks: [backend, edge]
+
+  web:
+    build: ../frontend
+    restart: unless-stopped
+    environment:
+      SMARTLOCK_DOMAIN: ${SMARTLOCK_DOMAIN:?set in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [backend, edge]
+    depends_on:
+      - core
+
+networks:
+  backend:
+    internal: true
+  edge: {}
+
+volumes:
+  db-data:
+  alerts:
+  mqtt-data:
+  caddy-data:
+  caddy-config:

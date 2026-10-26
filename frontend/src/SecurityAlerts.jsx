@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import api, { errorMessage } from './api';
-import { 
+import { lockdownLabel } from './door-status';
+import {
     AlertTriangle, 
     ShieldAlert, 
     ShieldCheck, 
@@ -18,6 +19,7 @@ import {
 export default function SecurityAlerts() {
     const [alerts, setAlerts] = useState([]);
     const [lockdown, setLockdown] = useState(false);
+    const [lockdownApplied, setLockdownApplied] = useState(false);
     const [loading, setLoading] = useState(true);
     const [lockdownBusy, setLockdownBusy] = useState(false);
     const [error, setError] = useState('');
@@ -32,6 +34,7 @@ export default function SecurityAlerts() {
             ]);
             setAlerts(alertsRes.data || []);
             setLockdown(Boolean(lockdownRes.data?.lockdown));
+            setLockdownApplied(Boolean(lockdownRes.data?.lockdownApplied));
             setError('');
         } catch (err) {
             setError(errorMessage(err));
@@ -58,6 +61,7 @@ export default function SecurityAlerts() {
         try {
             const res = await api.post('/lockdown/toggle', { enabled: !lockdown });
             setLockdown(res.data.lockdown);
+            setLockdownApplied(Boolean(res.data.lockdownApplied));
             setSuccessMsg(res.data.message);
             setTimeout(() => setSuccessMsg(''), 5000);
         } catch (err) {
@@ -168,6 +172,9 @@ export default function SecurityAlerts() {
                                     {lockdown ? 'ĐANG KÍCH HOẠT' : 'BÌNH THƯỜNG'}
                                 </span>
                             </div>
+                            <p className={`text-xs mt-1 font-semibold ${lockdown ? 'text-white' : 'text-gray-600'}`} aria-live="polite">
+                                {lockdownLabel(lockdown, lockdownApplied)}
+                            </p>
                             <p className={`text-sm mt-1 max-w-2xl ${lockdown ? 'text-white/90' : 'text-gray-500'}`}>
                                 {lockdown 
                                     ? 'Cửa bị khóa cứng! Mọi nỗ lực mở cửa bằng cả Quét khuôn mặt AI và Bấm mã PIN đều bị từ chối cho đến khi Quản trị viên tắt nút này.' 

@@ -62,3 +62,16 @@ esp32/config.h
 esp32/**/config.h
 backend-core/uploads/**
 !backend-core/uploads/.gitkeep
+
+# Cloud deployment secrets and data (deploy/README.md)
+deploy/.env
+deploy/backups/
+deploy/mosquitto/config/passwd
+deploy/mosquitto/certs/*
+!deploy/mosquitto/certs/.gitkeep
+deploy/local/.env.local
+deploy/local/certs/
+deploy/local/secrets/
+deploy/local/mosquitto/
+
+CLAUDE.md

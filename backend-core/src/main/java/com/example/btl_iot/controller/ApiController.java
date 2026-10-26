@@ -4,7 +4,6 @@ import com.example.btl_iot.entity.AccessLog;
 import com.example.btl_iot.repository.*;
 import com.example.btl_iot.security.*;
 import com.example.btl_iot.service.*;
-import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.HashMap;
@@ -17,33 +16,15 @@ import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/api")
+// Browser routes never unlock: face/PIN unlock exists only under /api/device (DEVICE_CONTRACT, D02/D04).
 public class ApiController {
-    public record PinAttempt(String username, String pinCode) {}
     private final UserRepository userRepository;
     private final AccessLogRepository accessLogRepository;
     private final ProfileService profiles;
-    private final DoorAccessService access;
     private final FaceGateway faces;
-    public ApiController(UserRepository users, AccessLogRepository logs, ProfileService profiles,
-                         DoorAccessService access, FaceGateway faces) {
+    public ApiController(UserRepository users, AccessLogRepository logs, ProfileService profiles, FaceGateway faces) {
         this.userRepository = users; this.accessLogRepository = logs;
-        this.profiles = profiles; this.access = access; this.faces = faces;
-    }
-    @PostMapping("/verify-pin")
-    public ResponseEntity<?> verifyPin(@RequestBody PinAttempt body, HttpServletRequest request) {
-        return response(access.pin(body.username(), body.pinCode(), request.getRemoteAddr()));
-    }
-    @PostMapping("/verify-face")
-    public ResponseEntity<?> verifyFace(@RequestParam("file") MultipartFile file) {
-        // AI has no authority to grant access: Core checks the current profile under a row lock.
-        return response(access.face(faces.identify(file)));
-    }
-    private ResponseEntity<?> response(DoorAccessService.Result result) {
-        var body = new HashMap<String, Object>();
-        body.put("status", result.status()); body.put("message", result.message());
-        if (result.reasonCode() != null) body.put("reasonCode", result.reasonCode());
-        if (result.requestId() != null) body.put("requestId", result.requestId());
-        return ResponseEntity.status(result.code()).body(body);
+        this.profiles = profiles; this.faces = faces;
     }
     @PostMapping("/register")
     public ResponseEntity<?> register(@RequestParam String username, @RequestParam String fullName,
@@ -102,13 +83,18 @@ public class ApiController {
                 item.put("userName", log.getUser().getFullName());
                 item.put("username", log.getUser().getUsername());
             } else if (log.getAccessMethod() != null && log.getAccessMethod().startsWith("OFFLINE_")) {
-                item.put("userName", "Mở khóa ngoại tuyến (Master PIN / Nút cơ)");
+                // Historical rows only: firmware no longer has an offline/master-PIN unlock path.
+                item.put("userName", "Mở khóa ngoại tuyến (bản ghi cũ)");
                 item.put("username", "OFFLINE");
+            } else if ("REMOTE_ADMIN".equals(log.getAccessMethod())) {
+                item.put("userName", "Quản trị viên mở từ xa");
+                item.put("username", "ADMIN");
             } else {
                 item.put("userName", "Khách / Không xác định");
                 item.put("username", "—");
             }
             item.put("imageUrl", log.getImageUrl());
+            item.put("commandId", log.getCommandId());
             items.add(item);
         }
 

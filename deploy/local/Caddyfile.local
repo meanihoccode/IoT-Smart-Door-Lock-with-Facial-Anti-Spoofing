@@ -1,0 +1,31 @@
+# Local staging only: same routing and headers as deploy/Caddyfile, certificate from the local test CA.
+{
+	auto_https disable_redirects
+}
+
+{$SMARTLOCK_DOMAIN}:443 {
+	tls /certs/fullchain.pem /certs/privkey.pem
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	request_body /api/* {
+		max_size 7MB
+	}
+
+	handle /api/* {
+		reverse_proxy core:8080
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

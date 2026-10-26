@@ -83,10 +83,13 @@ npm run dev
 *Trang web sẽ chạy tại địa chỉ được sinh ra (thường là `http://localhost:5173`).*
 
 ### 6. Phần cứng (ESP32)
-- Mở file `esp32/main.ino` bằng Arduino IDE.
-- Copy `esp32/config.example.h` thành `esp32/config.h`, điền Wi-Fi và IP MQTT của máy bạn trong file local này.
-- Có thể dùng `scripts/Compile-Esp32.ps1` để biên dịch bằng Arduino CLI; xem hướng dẫn Windows ở trên.
-- Cài các thư viện `PubSubClient` và nạp code vào board ESP32.
+- Mở sketch `esp32/main/main.ino` bằng Arduino IDE (đã kèm `PubSubClient`).
+- Copy `esp32/config.example.h` thành `esp32/config.h`, điền Wi-Fi, URL cloud, credential thiết bị và root CA trong file local này (xem [deploy/README.md](deploy/README.md)).
+- Biên dịch bằng `scripts/Compile-Esp32.ps1 -Fqbn '<FQBN đã xác minh cho ESP32-S3 N16R8>'`; script chỉ compile, không nạp.
+- Thiết bị chỉ mở khóa khi nhận command hợp lệ qua MQTT TLS; không còn master PIN hay web server camera LAN. Kiosk web chỉ hiển thị trạng thái.
+
+### 7. Triển khai cloud (IoT Level 3)
+Bộ Docker Compose, Caddy (HTTPS), Mosquitto (TLS + ACL) và runbook nằm trong [deploy/](deploy/README.md). Hợp đồng thiết bị: [docs/DEVICE_CONTRACT.md](docs/DEVICE_CONTRACT.md); trạng thái nghiệm thu: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 ---
 ## ✨ Tính năng nổi bật

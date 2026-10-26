@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from './api';
 import { Users, DoorOpen, ShieldCheck, Activity } from 'lucide-react';
+import DoorPanel from './DoorPanel';
+import { TONE_CLASSES, accessStatusLabel, methodLabel } from './door-status';
 
 const StatCard = ({ title, value, icon: Icon, trend }) => (
     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
@@ -62,6 +64,8 @@ const Overview = () => {
                 <StatCard title="Cảnh báo giả mạo" value="--" icon={Activity} />
             </div>
 
+            <DoorPanel />
+
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
                 <div className="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
                     <h3 className="text-lg font-semibold text-gray-900 mb-4">Lịch sử ra vào gần nhất</h3>
@@ -74,12 +78,12 @@ const Overview = () => {
                                     </div>
                                     <div>
                                         <p className="text-sm font-medium text-gray-900">{log.userName}</p>
-                                        <p className="text-xs text-gray-500">Xác thực bằng {log.method === 'FACE' ? 'Khuôn mặt' : 'Mã hồ sơ + PIN'}</p>
+                                        <p className="text-xs text-gray-500">Xác thực bằng {methodLabel(log.method)}</p>
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <span className={`text-xs font-medium px-2 py-1 rounded-full ${log.status === 'SUCCESS' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                                        {log.status === 'SUCCESS' ? 'Đã gửi lệnh' : log.status === 'COMMAND_FAILED' ? 'Lỗi gửi lệnh' : 'Từ chối / lỗi'}
+                                    <span className={`text-xs font-medium px-2 py-1 rounded-full ${TONE_CLASSES[accessStatusLabel(log.status).tone]}`}>
+                                        {accessStatusLabel(log.status).label}
                                     </span>
                                     <p className="text-xs text-gray-500 mt-1">{formatTime(log.time)}</p>
                                 </div>
@@ -93,7 +97,7 @@ const Overview = () => {
                         <ShieldCheck size={32} />
                     </div>
                     <h3 className="text-lg font-semibold text-gray-900">Kiểm soát quyền ra vào</h3>
-                    <p className="text-sm text-gray-500 mt-2">Hồ sơ bị thu hồi quyền không được mở cửa bằng PIN hoặc khuôn mặt. Trạng thái gửi lệnh chưa xác nhận chốt cửa đã mở thực tế.</p>
+                    <p className="text-sm text-gray-500 mt-2">Hồ sơ bị thu hồi quyền không được mở cửa bằng PIN hoặc khuôn mặt. “Đã điều khiển khóa” là xác nhận của thiết bị, chưa phải cảm biến cửa đã mở thực tế.</p>
                 </div>
             </div>
         </div>

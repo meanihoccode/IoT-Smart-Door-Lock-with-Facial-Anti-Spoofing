@@ -1,0 +1,19 @@
+# Local staging overlay: same images, networks and ACLs as production, but a throwaway test CA instead of
+# Let's Encrypt (no public domain needed). Generated files live in deploy/local/ and are git-ignored.
+#   sh local/setup-local.sh
+#   docker compose -p smartlock-local -f docker-compose.yml -f local/docker-compose.local.yml --env-file local/.env.local up -d --build
+services:
+  mosquitto:
+    volumes: !override
+      - ./local/mosquitto:/mosquitto/config
+      - ./local/certs:/mosquitto/certs:ro
+      - mqtt-data:/mosquitto/data
+
+  web:
+    ports: !override
+      - "8443:443"
+    volumes: !override
+      - ./local/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - ./local/certs:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config

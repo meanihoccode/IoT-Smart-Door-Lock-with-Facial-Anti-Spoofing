@@ -27,12 +27,11 @@ test('read requests do not fetch CSRF or add its header', async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].headers.get('X-CSRF-TOKEN'), undefined);
 });
-test('401 on protected API signals expired session, failed PIN/login does not', async () => {
+test('401 on protected API signals expired session, failed login does not', async () => {
   api.defaults.adapter = async (config) => {
     if (config.url === '/auth/csrf') return { config, status: 200, headers: {}, data: { token, headerName: 'X-CSRF-TOKEN' } };
     throw { config, response: { status: 401 } };
   };
-  await assert.rejects(api.post('/verify-pin', {}));
   await assert.rejects(api.post('/auth/login', {}));
   assert.equal(events.length, 0);
   await assert.rejects(api.get('/users'));

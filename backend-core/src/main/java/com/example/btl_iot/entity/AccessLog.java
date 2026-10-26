@@ -28,6 +28,15 @@ public class AccessLog {
     @Column(name = "image_url", columnDefinition = "TEXT")
     private String imageUrl; // Path or URL to the captured image for auditing
 
+    @Column(name = "device_id", length = 40)
+    private String deviceId;
+
+    @Column(name = "command_id", length = 36)
+    private String commandId;
+
+    @Column(name = "request_id", length = 64)
+    private String requestId;
+
     public AccessLog() {}
 
     public Long getId() { return id; }
@@ -47,4 +56,13 @@ public class AccessLog {
 
     public String getImageUrl() { return imageUrl; }
     public void setImageUrl(String imageUrl) { this.imageUrl = imageUrl; }
+
+    public String getDeviceId() { return deviceId; }
+    public void setDeviceId(String deviceId) { this.deviceId = deviceId; }
+
+    public String getCommandId() { return commandId; }
+    public void setCommandId(String commandId) { this.commandId = commandId; }
+
+    public String getRequestId() { return requestId; }
+    public void setRequestId(String requestId) { this.requestId = requestId; }
 }
