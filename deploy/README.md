@@ -23,13 +23,13 @@ ESP32-S3 ──REST  https://<domain>/api/device/*──► Caddy ──► Core
 
 - Một VM Linux có Docker Engine + Compose plugin, tối thiểu 2 vCPU / 4 GB RAM (AI chạy CPU), 20 GB đĩa.
 - Một bản ghi DNS `A` trỏ domain về IP VM; firewall chỉ mở 22, 80, 443.
-- Thư mục model InsightFace `buffalo_l` (sao chép từ máy dev `~/.insightface/models/buffalo_l`). Model không được tải tự động. Kiểm tra giấy phép InsightFace trước khi dùng ngoài mục đích học tập.
+- Thư mục model InsightFace `buffalo_l` (sao chép từ máy dev `~/.insightface/models/buffalo_l`, ví dụ `scp -r` vào `/opt/smartlock/insightface/models/`). Model không được tải tự động. Sau khi chép, chạy `chmod -R a+rX,go-w /opt/smartlock/insightface`: `scp` từ Windows tạo thư mục quyền `700`, container AI (uid 10001) sẽ không đọc được và báo `faceModel:false`. Kiểm tra giấy phép InsightFace trước khi dùng ngoài mục đích học tập.
 
 ## Triển khai lần đầu
 
 Chạy trong thư mục `deploy/` trên VM.
 
-1. **Cấu hình:** `cp .env.example .env`, điền domain, email, mật khẩu MySQL dài ngẫu nhiên, `INSIGHTFACE_MODELS_DIR` (thư mục chứa `models/buffalo_l`), `ADMIN_USERNAME/ADMIN_PASSWORD` cho lần chạy đầu. `chmod 600 .env`.
+1. **Cấu hình:** `cp .env.example .env`, điền domain, mật khẩu MySQL dài ngẫu nhiên (không cần email: Let's Encrypt cấp chứng chỉ không kèm email liên hệ), `INSIGHTFACE_MODELS_DIR` (thư mục chứa `models/buffalo_l`), `ADMIN_USERNAME/ADMIN_PASSWORD` cho lần chạy đầu. `chmod 600 .env`.
 2. **Credential thiết bị:** `sh scripts/new-device-credentials.sh door-01`. Đưa `DEVICE_TOKEN_SHA256` vào `.env`; giữ token cho `esp32/config.h`.
 3. **Khởi động:** `docker compose up -d --build`. Caddy tự lấy chứng chỉ (`docker compose logs -f web`).
 4. **Kiểm tra:** `docker compose ps`; `curl -s https://<domain>/api/door-status`; đăng nhập `/login`, đổi mật khẩu, rồi xóa `ADMIN_PASSWORD` khỏi `.env` và `docker compose up -d core`.

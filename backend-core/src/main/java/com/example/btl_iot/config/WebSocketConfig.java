@@ -24,12 +24,12 @@ public class WebSocketConfig implements WebSocketConfigurer {
         registry.addHandler(handler, "/ws/device");
     }
 
-    // Small frames only; an idle socket (no ping, no status heartbeat) is closed so the device shows offline.
+    // Small text frames; binary only for preview JPEGs (LivePreview.MAX_FRAME_BYTES); an idle socket (no ping, no status heartbeat) is closed so the device shows offline.
     @Bean
     public ServletServerContainerFactoryBean webSocketContainer(@Value("${smartlock.ws.idle-timeout:90s}") Duration idle) {
         var container = new ServletServerContainerFactoryBean();
         container.setMaxTextMessageBufferSize(4096);
-        container.setMaxBinaryMessageBufferSize(1024);
+        container.setMaxBinaryMessageBufferSize(100 * 1024);
         container.setMaxSessionIdleTimeout(idle.toMillis());
         return container;
     }

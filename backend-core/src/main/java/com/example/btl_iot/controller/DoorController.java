@@ -3,6 +3,7 @@ package com.example.btl_iot.controller;
 import com.example.btl_iot.service.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -13,8 +14,12 @@ public class DoorController {
     private final DoorAccessService access;
     private final DeviceStateService devices;
     private final CommandService commands;
-    public DoorController(DoorAccessService access, DeviceStateService devices, CommandService commands) {
-        this.access = access; this.devices = devices; this.commands = commands;
+    private final LastCaptureStore captures;
+    private final LivePreview preview;
+    public DoorController(DoorAccessService access, DeviceStateService devices, CommandService commands,
+                          LastCaptureStore captures, LivePreview preview) {
+        this.access = access; this.devices = devices; this.commands = commands; this.captures = captures;
+        this.preview = preview;
     }
 
     // Anonymous kiosk view: no names, no images, no credentials.
@@ -31,6 +36,9 @@ public class DoorController {
             body.put("lastCommand", Map.of("type", last.get("type"), "status", last.get("status"),
                     "method", String.valueOf(last.get("method")), "issuedAt", last.get("issuedAt")));
         }
+        var scan = captures.latest(devices.defaultDeviceId());
+        if (scan != null) body.put("lastScan", Map.of("reasonCode", String.valueOf(scan.reasonCode()),
+                "message", String.valueOf(scan.message()), "capturedAt", scan.capturedAt().toString()));
         return body;
     }
 
@@ -39,6 +47,35 @@ public class DoorController {
         var body = new LinkedHashMap<String, Object>(devices.status(devices.defaultDeviceId()));
         body.put("commands", commands.recent(devices.defaultDeviceId(), 10));
         return body;
+    }
+
+    // Latest door-camera photo and decision (admin only, in memory). The image URL carries seq to bust caches.
+    @GetMapping("/admin/door/last-capture")
+    public ResponseEntity<?> lastCapture() {
+        var scan = captures.latest(devices.defaultDeviceId());
+        if (scan == null) return ResponseEntity.noContent().build();
+        var body = new LinkedHashMap<String, Object>();
+        body.put("seq", scan.seq()); body.put("capturedAt", scan.capturedAt().toString());
+        body.put("reasonCode", scan.reasonCode()); body.put("message", scan.message());
+        body.put("commandId", scan.commandId());
+        body.put("imageUrl", "/api/admin/door/last-capture/image?seq=" + scan.seq());
+        return ResponseEntity.ok().header("Cache-Control", "no-store").body(body);
+    }
+
+    @GetMapping("/admin/door/last-capture/image")
+    public ResponseEntity<byte[]> lastCaptureImage() {
+        var scan = captures.latest(devices.defaultDeviceId());
+        if (scan == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok().header("Cache-Control", "no-store")
+                .contentType(MediaType.parseMediaType(scan.contentType())).body(scan.image());
+    }
+
+    // Live door-camera view (admin only). 204 while the device has not sent a fresh frame yet.
+    @GetMapping("/admin/door/live")
+    public ResponseEntity<byte[]> live() {
+        var frame = preview.latest(devices.defaultDeviceId());
+        if (frame == null) return ResponseEntity.noContent().header("Cache-Control", "no-store").build();
+        return ResponseEntity.ok().header("Cache-Control", "no-store").contentType(MediaType.IMAGE_JPEG).body(frame.jpeg());
     }
 
     @PostMapping("/admin/door/open")

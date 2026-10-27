@@ -46,6 +46,13 @@
 #ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #endif
+// Mạng dự phòng (tùy chọn), ví dụ hotspot điện thoại khi demo ở nơi khác. Để trống nếu không dùng.
+#ifndef WIFI_SSID_2
+#define WIFI_SSID_2 ""
+#endif
+#ifndef WIFI_PASSWORD_2
+#define WIFI_PASSWORD_2 ""
+#endif
 // Một tên miền cloud cho cả REST (https://CLOUD_HOST:CLOUD_PORT/api/...) và WebSocket (wss://.../ws/device).
 #ifndef CLOUD_HOST
 #define CLOUD_HOST "smartlock.example.com"
@@ -182,6 +189,10 @@ unsigned long lockoutStartTime = 0;
 unsigned long lastPirTrigger   = 0;
 unsigned long lastHeartbeat    = 0;
 unsigned long awaitCommandUntil = 0;
+unsigned long previewUntil     = 0; // Cloud yêu cầu xem trước camera (chỉ hiển thị, không dùng để mở cửa)
+unsigned long lastPreviewFrame = 0;
+const unsigned long PREVIEW_INTERVAL_MS = 333; // ~3 khung hình/giây
+const unsigned long PREVIEW_MAX_MS      = 20000;
 unsigned long pirWarmupEnd     = 0;
 bool pirRequiresRelease        = false; // Bắt buộc cảm biến PIR phải hạ về LOW trước khi kích hoạt đợt quét mới
 
@@ -447,6 +458,13 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
       String kind;
       // Chỉ bản tin "cmd" từ Core mới được xử lý như lệnh.
       if (jsonString(message, "kind", kind) && kind == "cmd") handleCommand(message);
+      // "preview": admin đang xem camera; chỉ gửi khung hình, không chấp hành gì.
+      else if (kind == "preview") {
+        uint64_t ms = 0;
+        jsonUInt64(message, "ms", ms);
+        if (ms > PREVIEW_MAX_MS) ms = PREVIEW_MAX_MS;
+        previewUntil = millis() + (unsigned long)ms;
+      }
       break;
     }
     default:
@@ -549,29 +567,43 @@ bool setupCamera() {
 // ============================================================================
 // HÀM KẾT NỐI WI-FI VÀ ĐỒNG BỘ THỜI GIAN (NTP cần cho TLS và TTL command)
 // ============================================================================
-void connectWiFi() {
-  Serial.printf("\n[WIFI] Đang kết nối tới: %s ...", WIFI_SSID); // Không in mật khẩu
+struct WifiNetwork { const char* ssid; const char* password; };
+const WifiNetwork WIFI_NETWORKS[] = { {WIFI_SSID, WIFI_PASSWORD}, {WIFI_SSID_2, WIFI_PASSWORD_2} };
+int wifiIndex = 0;
 
+int wifiNetworkCount() { return strlen(WIFI_SSID_2) > 0 ? 2 : 1; }
+
+// Không in mật khẩu, chỉ in tên mạng.
+void beginWifi(int index) {
+  wifiIndex = index % wifiNetworkCount();
+  Serial.printf("[WIFI] Đang kết nối tới: %s ...\n", WIFI_NETWORKS[wifiIndex].ssid);
+  WiFi.begin(WIFI_NETWORKS[wifiIndex].ssid, WIFI_NETWORKS[wifiIndex].password);
+}
+
+void connectWiFi() {
   WiFi.persistent(false);
   WiFi.disconnect(true);
   delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); // Tắt sleep để module RF giữ công suất tối đa
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 40) {
-    delay(500);
-    Serial.print(".");
-    retry++;
+  // Lúc khởi động: thử lần lượt từng mạng, mỗi mạng tối đa 10 giây.
+  for (int n = 0; n < wifiNetworkCount() && WiFi.status() != WL_CONNECTED; n++) {
+    beginWifi(n);
+    for (int retry = 0; retry < 20 && WiFi.status() != WL_CONNECTED; retry++) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[WIFI OK] IP ESP32-S3: %s (RSSI: %d dBm)\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    Serial.printf("[WIFI OK] Mạng: %s, IP ESP32-S3: %s (RSSI: %d dBm)\n", WIFI_NETWORKS[wifiIndex].ssid,
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
     beep(2, 80);
   } else {
-    Serial.printf("\n[WIFI CHƯA KẾT NỐI] Mã trạng thái: %d. Sẽ thử lại trong nền; không mở khóa khi offline.\n", WiFi.status());
+    Serial.printf("[WIFI CHƯA KẾT NỐI] Mã trạng thái: %d. Sẽ thử lại trong nền; không mở khóa khi offline.\n", WiFi.status());
   }
 }
 
@@ -616,6 +648,17 @@ Decision decisionFrom(int code, const String& response) {
   if (code == 429) return Decision::Throttled;
   if (code == 403) return Decision::Lockdown;
   return Decision::Unavailable; // Mạng/cloud/AI lỗi: không mở và không tính là kẻ lạ
+}
+
+// Gửi một khung JPEG xem trước qua WebSocket (nhị phân). Bỏ qua nếu camera đang bận chụp xác thực.
+void sendPreviewFrame() {
+  if (!cameraReady || !camMutex || xSemaphoreTake(camMutex, 0) != pdTRUE) return;
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (fb) {
+    if (fb->len <= 100 * 1024) ws.sendBIN(fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+  }
+  xSemaphoreGive(camMutex);
 }
 
 // Chụp một khung JPEG mới và gửi multipart kèm các trường văn bản (đã kiểm soát nội dung).
@@ -882,10 +925,10 @@ void loop() {
   static unsigned long lastWifiRetry = 0;
   static unsigned long lastClockRetry = 0;
   if (WiFi.status() != WL_CONNECTED) {
+    // Mỗi lần thử lại chuyển sang mạng kế tiếp; chỉ một mạng thì luôn thử lại mạng đó.
     if (now - lastWifiRetry >= 8000) {
       lastWifiRetry = now;
-      Serial.printf("[WIFI] Đang thử kết nối lại Wi-Fi '%s'...\n", WIFI_SSID);
-      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      beginWifi(wifiIndex + 1);
     }
   } else {
     if (!timeSynced() && now - lastClockRetry >= 30000) { lastClockRetry = now; syncClock(2000); }
@@ -893,6 +936,10 @@ void loop() {
     if (wsStarted) {
       ws.loop(); // nhận lệnh, gửi ping, tự kết nối lại
       if (wsConnected && millis() - lastHeartbeat >= HEARTBEAT_MS) publishStatus();
+      if (wsConnected && (long)(previewUntil - millis()) > 0 && millis() - lastPreviewFrame >= PREVIEW_INTERVAL_MS) {
+        lastPreviewFrame = millis();
+        sendPreviewFrame();
+      }
     }
   }
 

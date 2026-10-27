@@ -68,7 +68,6 @@ services:
     restart: unless-stopped
     environment:
       SMARTLOCK_DOMAIN: ${SMARTLOCK_DOMAIN:?set in .env}
-      ACME_EMAIL: ${ACME_EMAIL:?set in .env}
     ports:
       - "80:80"
       - "443:443"

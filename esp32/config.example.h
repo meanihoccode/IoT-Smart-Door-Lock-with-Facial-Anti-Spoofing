@@ -2,8 +2,12 @@
 
 // Copy to config.h (same folder) and fill in before flashing. config.h is private and ignored by Git.
 // Never commit real Wi-Fi passwords or device tokens. See deploy/README.md.
+// ESP32-S3 joins 2.4 GHz WPA2-Personal networks only (no 5 GHz, no captive portal / enterprise login).
 #define WIFI_SSID "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+// Optional fallback network (e.g. a phone hotspot for demos elsewhere). Leave empty to disable.
+#define WIFI_SSID_2 ""
+#define WIFI_PASSWORD_2 ""
 
 // One cloud domain for REST (https://CLOUD_HOST/api/...) and the command WebSocket (wss://CLOUD_HOST/ws/device).
 #define CLOUD_HOST "smartlock.example.com"

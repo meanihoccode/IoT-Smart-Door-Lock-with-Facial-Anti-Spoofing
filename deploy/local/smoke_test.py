@@ -1,13 +1,19 @@
-"""End-to-end smoke test for the LOCAL staging stack (deploy/local). Evidence level: staging with simulator.
+"""End-to-end smoke test with the simulator as the door node. Never targets a real door.
 
-Acts as the door node over REST + WebSocket (same acceptance rules as the firmware via the simulator) and as an
-admin browser. Creates a throwaway PIN profile and restarts the local Core container. Never targets a real door.
+Acts as the door over REST + WebSocket (same acceptance rules as the firmware) and as an admin browser.
+Creates a throwaway PIN profile and restarts the Core container.
 
-    python deploy/local/smoke_test.py          (needs websocket-client==1.8.0)
+Local staging (default):      python deploy/local/smoke_test.py
+Cloud staging (real domain):  SMOKE_CLOUD=https://<domain> SMOKE_SECRETS=<dir with token.txt, admin.txt,
+                              admin-user.txt> SMOKE_COMPOSE="ssh -i <key> ubuntu@<ip> cd smartlock/deploy && sudo docker compose"
+                              python deploy/local/smoke_test.py
+Cloud mode trusts the system CA store (Let's Encrypt). Needs websocket-client==1.8.0.
 """
 import http.cookiejar
 import json
+import os
 import secrets as rnd
+import shlex
 import ssl
 import struct
 import subprocess
@@ -23,12 +29,22 @@ sys.path.insert(0, str(HERE.parent.parent / "tools" / "device-simulator"))
 from device_simulator import DoorNode, device_request, multipart  # noqa: E402
 import websocket  # noqa: E402
 
-CLOUD = "https://localhost:8443"
-CA = str(HERE / "certs" / "ca.pem")
-SECRET = {name: (HERE / "secrets" / f"{name}.txt").read_text().strip() for name in ("token", "admin")}
-COMPOSE = ["docker", "compose", "-p", "smartlock-local", "-f", str(HERE.parent / "docker-compose.yml"),
-           "-f", str(HERE / "docker-compose.local.yml"), "--env-file", str(HERE / ".env.local")]
-TLS = ssl.create_default_context(cafile=CA)
+CLOUD = os.environ.get("SMOKE_CLOUD", "https://localhost:8443").rstrip("/")
+CLOUD_MODE = "SMOKE_CLOUD" in os.environ
+# Local staging pins the throwaway test CA; cloud staging uses the system trust store (None).
+CA = None if CLOUD_MODE else str(HERE / "certs" / "ca.pem")
+SECRETS_DIR = Path(os.environ.get("SMOKE_SECRETS", HERE / "secrets"))
+SECRET = {name: (SECRETS_DIR / f"{name}.txt").read_text().strip() for name in ("token", "admin")}
+ADMIN_USER = (SECRETS_DIR / "admin-user.txt").read_text().strip() if (SECRETS_DIR / "admin-user.txt").exists() else "localadmin"
+if "SMOKE_COMPOSE" in os.environ:
+    # Remote compose over SSH: the trailing compose arguments are appended to the remote command line.
+    _remote = shlex.split(os.environ["SMOKE_COMPOSE"], posix=False)
+    COMPOSE = _remote
+else:
+    COMPOSE = ["docker", "compose", "-p", "smartlock-local", "-f", str(HERE.parent / "docker-compose.yml"),
+               "-f", str(HERE / "docker-compose.local.yml"), "--env-file", str(HERE / ".env.local")]
+WS_URL = CLOUD.replace("https://", "wss://") + "/ws/device"
+TLS = ssl.create_default_context(cafile=CA) if CA else ssl.create_default_context()
 results = []
 
 
@@ -94,7 +110,7 @@ def handshake(headers, ca=CA, origin=None):
     try:
         sslopt = {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": ca} if ca else {"cert_reqs": ssl.CERT_REQUIRED}
         extra = {"origin": origin} if origin else {"suppress_origin": True}
-        websocket.create_connection("wss://localhost:8443/ws/device", header=headers, sslopt=sslopt, timeout=10, **extra).close()
+        websocket.create_connection(WS_URL, header=headers, sslopt=sslopt, timeout=10, **extra).close()
         return "101"
     except websocket.WebSocketBadStatusException as error:
         return str(error.status_code)
@@ -113,7 +129,7 @@ def connection(admin):
 
 def main():
     admin = Browser()
-    status, _ = admin.send("POST", "/api/auth/login", {"username": "localadmin", "password": SECRET["admin"]})
+    status, _ = admin.send("POST", "/api/auth/login", {"username": ADMIN_USER, "password": SECRET["admin"]})
     check("admin login over HTTPS (same origin, CSRF)", status == 200, f"HTTP {status}")
     test_pin = f"{rnd.randbelow(10**6):06d}"
     body, ctype = form({"username": "smoke-" + rnd.token_hex(3), "fullName": "Smoke Test", "pinCode": test_pin})
@@ -127,8 +143,16 @@ def main():
     browser_origin = handshake(good, origin="https://evil.example")
     check("a browser page cannot open the device socket even with the token (Origin refused)",
           browser_origin == "403", browser_origin)
-    untrusted = handshake(good, ca=None)
-    check("wss is verified (system trust store rejects the test CA)", untrusted.startswith("tls-error"), untrusted)
+    if CLOUD_MODE:
+        trusted = handshake(good, ca=None)
+        check("wss certificate is publicly trusted (system store, Let's Encrypt)", trusted == "101", trusted)
+        other_ca = HERE / "certs" / "ca.pem"
+        if other_ca.exists():
+            wrong = handshake(good, ca=str(other_ca))
+            check("wss is verified (an unrelated CA does not accept the server)", wrong.startswith("tls-error"), wrong)
+    else:
+        untrusted = handshake(good, ca=None)
+        check("wss is verified (system trust store rejects the test CA)", untrusted.startswith("tls-error"), untrusted)
 
     state = HERE / "secrets" / "smoke-device-state.json"
     state.unlink(missing_ok=True)
@@ -186,7 +210,7 @@ def main():
     wait_for(lambda: Browser().send("GET", "/api/door-status", csrf=False)[0] == 200, 120)
     check("door reconnects its WebSocket by itself after Core restarts", wait_for(lambda: door.connects > connects, 60))
     admin = Browser()
-    admin.send("POST", "/api/auth/login", {"username": "localadmin", "password": SECRET["admin"]})
+    admin.send("POST", "/api/auth/login", {"username": ADMIN_USER, "password": SECRET["admin"]})
     check("history persists across Core restart", command_status(admin, command_id) == "EXECUTED")
     status, granted = pin(test_pin)
     command_id = granted.get("commandId")

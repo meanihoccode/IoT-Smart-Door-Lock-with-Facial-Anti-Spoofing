@@ -3,6 +3,7 @@ package com.example.btl_iot.channel;
 import com.example.btl_iot.entity.DoorCommand;
 import com.example.btl_iot.repository.*;
 import com.example.btl_iot.security.AttemptLimiter;
+import com.example.btl_iot.service.LivePreview;
 import com.example.btl_iot.service.ProfileService;
 import java.net.URI;
 import java.net.http.*;
@@ -44,6 +45,7 @@ class DeviceWebSocketTests {
     @Autowired ProfileService profiles;
     @Autowired AttemptLimiter limiter;
     @Autowired DeviceChannel channel;
+    @Autowired LivePreview preview;
 
     // Collects text frames like the firmware's WStype_TEXT handler.
     static final class Door implements WebSocket.Listener {
@@ -132,6 +134,32 @@ class DeviceWebSocketTests {
         door.send("{\"v\":1,\"kind\":\"ack\",\"deviceId\":\"door-01\",\"commandId\":\"" + id + "\",\"ack\":\"EXECUTED\"}");
         assertTrue(eventually(() -> commands.findById(id).orElseThrow().getStatus() == DoorCommand.Status.EXECUTED));
         assertTrue(door.frames.isEmpty(), "exactly one frame per command");
+    }
+
+    // Preview frames are display-only: requested by the admin view, never stored as a command or sent to AI.
+    @Test void livePreviewIsRequestedFromDeviceAndOnlyJpegFramesAreKept() throws Exception {
+        var door = connect(TOKEN);
+        assertTrue(eventually(() -> channel.isConnected("door-01")));
+        assertNull(preview.latest("door-01"));
+        var request = door.next(json);
+        assertEquals("preview", request.path("kind").asText());
+        assertTrue(request.path("ms").asLong() > 0);
+        assertNull(preview.latest("door-01"));
+        assertTrue(door.frames.isEmpty(), "renewal is rate-limited");
+
+        door.socket.sendBinary(java.nio.ByteBuffer.wrap("not-a-jpeg".getBytes()), true).join();
+        byte[] jpeg = {(byte) 0xFF, (byte) 0xD8, 1, 2, 3, (byte) 0xFF, (byte) 0xD9};
+        door.socket.sendBinary(java.nio.ByteBuffer.wrap(jpeg), true).join();
+        assertTrue(eventually(() -> preview.latest("door-01") != null));
+        assertArrayEquals(jpeg, preview.latest("door-01").jpeg());
+        assertEquals(0, commands.count());
+
+        var anonymous = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/admin/door/live")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, anonymous.statusCode());
+        door.socket.sendClose(WebSocket.NORMAL_CLOSURE, "bye").join();
+        assertTrue(eventually(() -> !channel.isConnected("door-01")));
+        assertNull(preview.latest("door-01"));
     }
 
     @Test void deviceCannotIssueCommandsOverItsSocket() throws Exception {

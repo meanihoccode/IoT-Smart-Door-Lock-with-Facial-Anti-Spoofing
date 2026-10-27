@@ -94,6 +94,12 @@ const Kiosk = () => {
                                 </span>
                             </div>
                         )}
+                        {door?.lastScan && (
+                            <div className="mt-4 pt-4 border-t border-gray-100">
+                                <p className="text-xs text-gray-500">Lần quét khuôn mặt gần nhất · {new Date(door.lastScan.capturedAt).toLocaleString('vi-VN')}</p>
+                                <p className="text-sm font-medium text-gray-900 mt-1">{door.lastScan.message}</p>
+                            </div>
+                        )}
                         {error && <p role="alert" className="text-sm text-red-700 mt-4">{error}</p>}
                     </section>
                 </div>

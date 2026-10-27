@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { DoorOpen, Loader2 } from 'lucide-react';
 import api, { errorMessage } from './api';
+import LiveCamera from './LiveCamera';
 import { STATUS_POLL_MS, TONE_CLASSES, commandLabel, commandTypeLabel, connectionLabel, lockdownLabel, methodLabel } from './door-status';
 
 // Admin view of the door node: connection, lockdown applied/pending, command lifecycle and remote open.
@@ -10,9 +11,13 @@ export default function DoorPanel() {
     const [notice, setNotice] = useState('');
     const [error, setError] = useState('');
 
+    const [scan, setScan] = useState(null);
+
     const load = useCallback(async () => {
         try { const { data } = await api.get('/admin/door'); setDoor(data); }
         catch (err) { setError(errorMessage(err)); }
+        try { const { data, status } = await api.get('/admin/door/last-capture'); setScan(status === 204 ? null : data); }
+        catch { /* preview only */ }
     }, []);
 
     useEffect(() => {
@@ -54,6 +59,21 @@ export default function DoorPanel() {
             </div>
             {notice && <p className="text-sm text-gray-700 mb-3" aria-live="polite">{notice}</p>}
             {error && <p role="alert" className="text-sm text-red-700 mb-3">{error}</p>}
+            <LiveCamera />
+            <h4 className="text-sm font-medium text-gray-900 mb-2">Lần quét khuôn mặt gần nhất (camera cửa)</h4>
+            {scan ? (
+                <div className="flex flex-col sm:flex-row gap-4 mb-5">
+                    <img src={scan.imageUrl} alt="Ảnh camera ESP32 chụp gần nhất"
+                         className="w-full sm:w-64 rounded-lg border border-gray-200 bg-gray-100 object-contain" />
+                    <div className="text-sm">
+                        <span className={`text-xs font-medium px-2 py-1 rounded-full ${scan.commandId ? TONE_CLASSES.ok : TONE_CLASSES.bad}`}>
+                            {scan.reasonCode}
+                        </span>
+                        <p className="text-gray-700 mt-2">{scan.message}</p>
+                        <p className="text-xs text-gray-400 mt-1">{new Date(scan.capturedAt).toLocaleString('vi-VN')}</p>
+                    </div>
+                </div>
+            ) : <p className="text-sm text-gray-500 mb-5">Chưa có lần quét nào kể từ khi máy chủ khởi động.</p>}
             <h4 className="text-sm font-medium text-gray-900 mb-2">Lệnh gần đây</h4>
             <ul className="divide-y divide-gray-50">
                 {(door?.commands || []).map(command => {

@@ -324,6 +324,21 @@ class BtlIotApplicationTests {
         assertEquals(409,door.face(faceId).statusCode());
         verify(faces,times(1)).identify(any());
     }
+    @Test void lastDoorCaptureIsAdminOnlyAndKioskSeesResultWithoutImage() throws Exception {
+        var door = new Door(); var browser = new Browser();
+        when(faces.identify(any())).thenReturn(FaceGateway.FaceMatch.rejected("NO_FACE","ai-9"));
+        door.face();
+        assertEquals(401,browser.get("/admin/door/last-capture").statusCode());
+        assertEquals(401,browser.get("/admin/door/last-capture/image").statusCode());
+        var kiosk = json.readTree(browser.get("/door-status").body());
+        assertEquals("NO_FACE",kiosk.path("lastScan").path("reasonCode").asText());
+        assertFalse(kiosk.path("lastScan").has("imageUrl"));
+        browser.login();
+        var meta = json.readTree(browser.get("/admin/door/last-capture").body());
+        assertEquals("NO_FACE",meta.get("reasonCode").asText());
+        assertEquals("stub-image",browser.get("/admin/door/last-capture/image").body());
+        assertEquals(0,commands.count());
+    }
     @Test void revokedProfileCannotUsePinOrFaceAndHistoryRemains() throws Exception {
         var profile = profiles.create("one","One","123456","[1]","testadmin");
         var door = new Door(); assertEquals(202,door.pin("123456").statusCode());

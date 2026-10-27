@@ -1,6 +1,5 @@
-{
-	email {$ACME_EMAIL}
-}
+# No ACME contact email is configured: Let's Encrypt issues and Caddy renews certificates without one,
+# so no personal data is shared. Add a global "{ email you@example.com }" block only if you want notices.
 
 # Same origin for the React app and the API, so session cookies stay SameSite=Strict and Secure.
 {$SMARTLOCK_DOMAIN} {

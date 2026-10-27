@@ -32,7 +32,6 @@ if [ ! -f .env.local ]; then
   printf 'Local-%s\n' "$(secret 12)" > secrets/admin.txt
   cat > .env.local <<EOF
 SMARTLOCK_DOMAIN=localhost
-ACME_EMAIL=local@example.invalid
 MYSQL_DATABASE=btl_iot
 MYSQL_USER=smartlock
 MYSQL_PASSWORD=$(secret 16)

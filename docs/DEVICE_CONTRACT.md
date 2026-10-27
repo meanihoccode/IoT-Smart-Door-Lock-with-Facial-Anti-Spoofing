@@ -52,6 +52,13 @@ Core tạo command trong transaction có khóa hàng hồ sơ + thiết bị (ki
 
 `EXECUTED` nghĩa là đã điều khiển chấp hành, **không** phải cảm biến xác nhận cửa mở. Lockdown sống sót qua reboot (NVS); khi thiết bị báo `status` khác `desired`, Core gửi lệnh lockdown mới (không chồng lệnh khi lệnh trước còn hiệu lực). Mất mạng/cloud: không có đường mở nào (đã bỏ master PIN), timer khóa lại chạy độc lập vòng `loop`.
 
+## Xem trước camera (chỉ hiển thị) — đã triển khai 27/10/2026
+
+- Admin mở khung "Camera cửa trực tiếp" → `GET /api/admin/door/live` (phiên admin). Core gửi xuống WebSocket `{"v":1,"kind":"preview","ms":15000}`, gia hạn tối đa mỗi 5 s khi admin còn xem.
+- Firmware: `kind:"preview"` chỉ đặt cửa sổ xem trước (tối đa 20 s), không chấp hành gì. Trong cửa sổ đó gửi khung JPEG dạng **binary frame** ~3 hình/s, ≤ 100 KB; bỏ qua khi camera đang chụp xác thực.
+- Core chỉ nhận JPEG (magic `FFD8`) từ phiên thiết bị đã xác thực, giữ khung mới nhất trong RAM, xóa khi thiết bị ngắt kết nối. Khung xem trước **không** gửi tới AI, không tạo command, không thay ảnh xác thực qua `POST /api/device/face`.
+- Ảnh lần quét PIR gần nhất và kết quả: `GET /api/admin/door/last-capture` (+`/image`), chỉ admin, chỉ trong RAM. `GET /api/door-status` (công khai) chỉ có `lastScan` dạng văn bản, không có ảnh.
+
 ## Nguồn ảnh và quyền tạo command — bắt buộc
 
 - Chỉ ảnh upload từ ESP32 đã xác thực thiết bị mới được xét tạo lệnh mở bằng khuôn mặt.
