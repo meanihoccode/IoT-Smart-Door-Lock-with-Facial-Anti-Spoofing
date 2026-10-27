@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
     "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa", "spring.datasource.password=",
     "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect", "spring.jpa.hibernate.ddl-auto=update",
     "spring.sql.init.mode=always", "spring.sql.init.schema-locations=classpath:legacy-users.sql",
-    "smartlock.mqtt.enabled=false", "smartlock.pin.migrate-legacy=false",
+    "smartlock.pin.migrate-legacy=false",
     "smartlock.admin.username=", "smartlock.admin.password=", "server.address=127.0.0.1"
 })
 class LegacySchemaUpgradeTests {

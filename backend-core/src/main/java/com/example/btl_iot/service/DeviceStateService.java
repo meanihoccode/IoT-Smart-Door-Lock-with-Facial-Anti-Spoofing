@@ -58,6 +58,8 @@ public class DeviceStateService {
         device.setOnline(online);
         if (online) {
             device.setLastSeenAt(clock.instant());
+            // A fresh connection must re-report lockdown; until then "applied" is unknown, not the old value.
+            if (!wasOnline) device.setReportedLockdown(null);
             if (reportedLockdown != null) device.setReportedLockdown(reportedLockdown);
             if (firmware != null) device.setFirmware(firmware.length() > 32 ? firmware.substring(0, 32) : firmware);
         }

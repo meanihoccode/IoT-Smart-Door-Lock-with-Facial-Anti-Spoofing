@@ -10,7 +10,7 @@ NOW = 1_800_000_000
 
 
 def command(seq, command_id=None, kind="UNLOCK", issued=NOW, expires=NOW + 15, **extra):
-    body = {"v": 1, "type": kind, "deviceId": "door-01", "commandId": command_id or f"cmd-{seq}", "seq": seq,
+    body = {"v": 1, "kind": "cmd", "type": kind, "deviceId": "door-01", "commandId": command_id or f"cmd-{seq}", "seq": seq,
             "issuedAt": issued, "expiresAt": expires, "unlockMs": 7000}
     body.update(extra)
     return json.dumps(body)
@@ -75,6 +75,14 @@ class CommandProcessorTests(unittest.TestCase):
     def test_unlock_duration_is_clamped(self):
         self.acks(command(10, unlockMs=600000))
         self.assertLessEqual(self.p.unlocked_until - NOW, 15)
+
+    def test_only_cmd_frames_are_commands(self):
+        missing_kind = json.loads(command(10))
+        del missing_kind["kind"]
+        for frame in (command(10).replace('"cmd"', '"ack"'), command(10).replace('"cmd"', '"status"'), json.dumps(missing_kind)):
+            self.assertEqual(self.acks(frame), [])
+        self.assertEqual(self.p.executions, [])
+        self.assertTrue(all(a["kind"] == "ack" for a in self.p.handle(command(11))))
 
 
 if __name__ == "__main__":

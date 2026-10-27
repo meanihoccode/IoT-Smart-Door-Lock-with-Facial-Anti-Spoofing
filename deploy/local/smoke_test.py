@@ -1,12 +1,13 @@
 """End-to-end smoke test for the LOCAL staging stack (deploy/local). Evidence level: staging with simulator.
 
-Acts as the door node (same acceptance rules as the firmware via CommandProcessor) and as an admin browser.
-Creates a throwaway PIN profile. Restarts the local broker and Core containers. Never targets a real door.
+Acts as the door node over REST + WebSocket (same acceptance rules as the firmware via the simulator) and as an
+admin browser. Creates a throwaway PIN profile and restarts the local Core container. Never targets a real door.
 
-    python deploy/local/smoke_test.py          (needs paho-mqtt==2.1.0)
+    python deploy/local/smoke_test.py          (needs websocket-client==1.8.0)
 """
 import http.cookiejar
 import json
+import secrets as rnd
 import ssl
 import struct
 import subprocess
@@ -14,19 +15,17 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 import zlib
-import secrets as rnd
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / "tools" / "device-simulator"))
-from device_simulator import CommandProcessor  # noqa: E402
-import paho.mqtt.client as mqtt  # noqa: E402
+from device_simulator import DoorNode, device_request, multipart  # noqa: E402
+import websocket  # noqa: E402
 
-API = "https://localhost:8443"
+CLOUD = "https://localhost:8443"
 CA = str(HERE / "certs" / "ca.pem")
-SECRET = {name: (HERE / "secrets" / f"{name}.txt").read_text().strip() for name in ("token", "mqtt", "admin")}
+SECRET = {name: (HERE / "secrets" / f"{name}.txt").read_text().strip() for name in ("token", "admin")}
 COMPOSE = ["docker", "compose", "-p", "smartlock-local", "-f", str(HERE.parent / "docker-compose.yml"),
            "-f", str(HERE / "docker-compose.local.yml"), "--env-file", str(HERE / ".env.local")]
 TLS = ssl.create_default_context(cafile=CA)
@@ -58,7 +57,7 @@ class Browser:
             token = json.loads(self.send("GET", "/api/auth/csrf")[1])
             headers[token["headerName"]] = token["token"]
         data = body if isinstance(body, (bytes, type(None))) else json.dumps(body).encode()
-        request = urllib.request.Request(API + path, data=data, method=method, headers=headers)
+        request = urllib.request.Request(CLOUD + path, data=data, method=method, headers=headers)
         try:
             with self.opener.open(request, timeout=40) as response:
                 return response.status, response.read().decode()
@@ -80,79 +79,36 @@ def gray_png(size=96):
 
 
 def device(path, body, content_type, request_id=None, token=None):
-    request = urllib.request.Request(API + "/api/device" + path, data=body, method="POST", headers={
-        "Authorization": "Bearer " + (token or SECRET["token"]), "X-Device-Id": "door-01",
-        "X-Request-Id": request_id or uuid.uuid4().hex, "X-Request-Time": str(int(time.time())),
-        "Content-Type": content_type})
-    try:
-        with urllib.request.urlopen(request, timeout=40, context=TLS) as response:
-            return response.status, json.loads(response.read().decode() or "{}")
-    except urllib.error.HTTPError as error:
-        text = error.read().decode()
-        return error.code, json.loads(text) if text.startswith("{") else {}
+    status, text = device_request(CLOUD, "door-01", token or SECRET["token"], "/api/device" + path, body, content_type,
+                                  CA, request_id)
+    return status, json.loads(text) if text.startswith("{") else {}
 
 
 def pin(value, **kw):
     return device("/pin", json.dumps({"pinCode": value}).encode(), "application/json", **kw)
 
 
-class Door:
-    """In-process door node over MQTT TLS with the device's own credentials."""
-
-    def __init__(self, state_file):
-        self.processor = CommandProcessor("door-01", state_file)
-        self.acks, self.connects = [], 0
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="door-01", clean_session=True)
-        self.client.username_pw_set("door-01", SECRET["mqtt"])
-        self.client.tls_set(ca_certs=CA)
-        self.client.will_set("smartlock/door-01/status", json.dumps({"v": 1, "deviceId": "door-01", "online": False}), 1, True)
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
-        self.client.reconnect_delay_set(1, 5)
-
-    def on_connect(self, client, _u, _f, reason, _p):
-        if reason.is_failure:
-            return
-        self.connects += 1
-        client.subscribe("smartlock/door-01/cmd", qos=1)
-        client.publish("smartlock/door-01/status", json.dumps({"v": 1, "deviceId": "door-01", "online": True,
-                       "lockdown": self.processor.lockdown, "fw": "smoke"}), retain=True)
-
-    def on_message(self, client, _u, message):
-        for ack in self.processor.handle(message.payload.decode()):
-            self.acks.append(ack)
-            client.publish("smartlock/door-01/ack", json.dumps(ack))
-
-    def start(self):
-        self.client.connect("localhost", 8883, keepalive=30)
-        self.client.loop_start()
-        return wait_for(lambda: self.connects > 0, 15)
-
-    def acked(self, command_id, kind):
-        return any(a["commandId"] == command_id and a["ack"] == kind for a in self.acks)
-
-
-def mqtt_connect(user=None, password=None, cafile=CA):
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="probe-" + rnd.token_hex(3))
-    outcome = {}
-    client.on_connect = lambda c, u, f, reason, p: outcome.setdefault("reason", reason)
-    if user:
-        client.username_pw_set(user, password)
-    client.tls_set(ca_certs=cafile)
+def handshake(headers, ca=CA, origin=None):
+    """Returns the HTTP status (or TLS error) of a WebSocket handshake without keeping the connection.
+    By default no Origin header is sent, like the firmware; pass origin to act like a browser page."""
     try:
-        client.connect("localhost", 8883, keepalive=10)
+        sslopt = {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": ca} if ca else {"cert_reqs": ssl.CERT_REQUIRED}
+        extra = {"origin": origin} if origin else {"suppress_origin": True}
+        websocket.create_connection("wss://localhost:8443/ws/device", header=headers, sslopt=sslopt, timeout=10, **extra).close()
+        return "101"
+    except websocket.WebSocketBadStatusException as error:
+        return str(error.status_code)
     except ssl.SSLError as error:
-        return "tls-error:" + error.reason if error.reason else "tls-error"
-    client.loop_start()
-    wait_for(lambda: "reason" in outcome, 8)
-    client.loop_stop()
-    client.disconnect()
-    return str(outcome.get("reason"))
+        return "tls-error:" + (error.reason or "")
 
 
 def command_status(admin, command_id):
     door = json.loads(admin.send("GET", "/api/admin/door")[1])
     return next((c["status"] for c in door["commands"] if c["commandId"] == command_id), None)
+
+
+def connection(admin):
+    return json.loads(admin.send("GET", "/api/admin/door")[1]).get("connection")
 
 
 def main():
@@ -164,34 +120,41 @@ def main():
     status, _ = admin.send("POST", "/api/register", body, ctype)
     check("admin creates throwaway PIN profile", status == 201, f"HTTP {status}")
 
-    check("broker refuses anonymous clients", "Not authorized" in mqtt_connect() or "Bad user" in mqtt_connect())
-    check("broker refuses wrong device password", mqtt_connect("door-01", "wrong") != "Success")
-    untrusted = mqtt_connect("door-01", SECRET["mqtt"], cafile=None)
-    check("TLS is verified (system trust store rejects the test CA)", untrusted.startswith("tls-error"), untrusted)
+    check("WebSocket handshake without device token is refused", handshake([]) == "401", handshake([]))
+    wrong = handshake(["Authorization: Bearer " + "0" * 64, "X-Device-Id: door-01"])
+    check("WebSocket handshake with wrong token is refused", wrong == "401", wrong)
+    good = ["Authorization: Bearer " + SECRET["token"], "X-Device-Id: door-01"]
+    browser_origin = handshake(good, origin="https://evil.example")
+    check("a browser page cannot open the device socket even with the token (Origin refused)",
+          browser_origin == "403", browser_origin)
+    untrusted = handshake(good, ca=None)
+    check("wss is verified (system trust store rejects the test CA)", untrusted.startswith("tls-error"), untrusted)
 
     state = HERE / "secrets" / "smoke-device-state.json"
     state.unlink(missing_ok=True)
-    door = Door(state)
-    check("device connects with TLS + own credentials", door.start())
-    time.sleep(1)
+    door = DoorNode(CLOUD, "door-01", SECRET["token"], CA, state, log=lambda *_: None)
+    check("door connects over wss with its token", door.start())
+    check("Core shows the door ONLINE while its socket is open", wait_for(lambda: connection(admin) == "ONLINE"))
 
-    door.client.publish("smartlock/door-01/cmd", json.dumps({"v": 1, "type": "UNLOCK", "deviceId": "door-01",
-                        "commandId": "forged", "seq": 2**60, "issuedAt": int(time.time()), "expiresAt": int(time.time()) + 15}), qos=1)
+    before = len(json.loads(admin.send("GET", "/api/admin/door")[1])["commands"])
+    door.send({"v": 1, "kind": "cmd", "type": "UNLOCK", "deviceId": "door-01", "commandId": "forged",
+               "seq": 2**60, "issuedAt": int(time.time()), "expiresAt": int(time.time()) + 15})
     time.sleep(2)
-    check("ACL: a device cannot publish commands (forged UNLOCK never delivered)", not door.processor.executions)
+    after = len(json.loads(admin.send("GET", "/api/admin/door")[1])["commands"])
+    check("a device cannot issue commands over its socket", not door.processor.executions and after == before)
 
     browser = Browser()
     status, _ = browser.send("POST", "/api/verify-pin", {"pinCode": test_pin})
     check("browser kiosk cannot unlock by PIN even with CSRF", status >= 400, f"HTTP {status}")
-    status, _ = device("/pin", json.dumps({"pinCode": test_pin}).encode(), "application/json", token="0" * 64)
-    check("wrong device token is rejected", status == 401, f"HTTP {status}")
+    status, _ = pin(test_pin, token="0" * 64)
+    check("wrong device token is rejected on REST", status == 401, f"HTTP {status}")
 
-    request_id = uuid.uuid4().hex
+    request_id = rnd.token_hex(16)
     status, granted = pin(test_pin, request_id=request_id)
     command_id = granted.get("commandId")
-    check("device PIN -> 202 GRANTED with commandId", status == 202 and granted.get("decision") == "GRANTED" and command_id,
+    check("REST: device PIN -> 202 GRANTED with commandId", status == 202 and granted.get("decision") == "GRANTED" and command_id,
           f"HTTP {status} {granted.get('commandStatus')}")
-    check("door receives command and ACKs RECEIVED then EXECUTED",
+    check("WebSocket: door receives command and ACKs RECEIVED then EXECUTED",
           wait_for(lambda: door.acked(command_id, "EXECUTED")) and door.acked(command_id, "RECEIVED"))
     check("Core records EXECUTED from the device ACK", wait_for(lambda: command_status(admin, command_id) == "EXECUTED"))
     check("exactly one actuation for one request", door.processor.executions == [command_id])
@@ -202,7 +165,7 @@ def main():
     status, denied = pin("000000" if test_pin != "000000" else "111111")
     check("wrong PIN is denied without a command", status == 401 and "commandId" not in denied, f"HTTP {status}")
 
-    status, face = device("/face", *form_file(gray_png()))
+    status, face = device("/face", *multipart(gray_png(), "door.png", "image/png"))
     check("face upload is processed by the AI container (not MODEL_UNAVAILABLE)",
           face.get("aiRequestId") and face.get("reasonCode") not in (None, "MODEL_UNAVAILABLE", "INVALID_AI_RESPONSE"),
           f"HTTP {status} {face.get('reasonCode')}")
@@ -218,22 +181,20 @@ def main():
     off_id = json.loads(toggled).get("commandId")
     check("lockdown off is ACKed", wait_for(lambda: door.acked(off_id, "EXECUTED")) and not door.processor.lockdown)
 
-    before = door.connects
-    subprocess.run(COMPOSE + ["restart", "mosquitto"], check=True, capture_output=True)
-    check("device reconnects after broker restart", wait_for(lambda: door.connects > before, 40))
-    time.sleep(8)  # Core reconnect backoff
-    status, granted = pin(test_pin)
-    command_id = granted.get("commandId")
-    check("after broker restart Core resubscribed: command + EXECUTED ACK flow again",
-          status == 202 and wait_for(lambda: command_status(admin, command_id) == "EXECUTED", 30), f"HTTP {status}")
-    door.processor.unlocked_until = 0
-
+    connects = door.connects
     subprocess.run(COMPOSE + ["restart", "core"], check=True, capture_output=True)
-    wait_for(lambda: admin.send("GET", "/api/door-status", csrf=False)[0] == 200, 120)
+    wait_for(lambda: Browser().send("GET", "/api/door-status", csrf=False)[0] == 200, 120)
+    check("door reconnects its WebSocket by itself after Core restarts", wait_for(lambda: door.connects > connects, 60))
     admin = Browser()
     admin.send("POST", "/api/auth/login", {"username": "localadmin", "password": SECRET["admin"]})
-    check("data persists across Core restart (profile still opens, history kept)",
-          command_status(admin, command_id) == "EXECUTED" and pin(test_pin)[0] == 202)
+    check("history persists across Core restart", command_status(admin, command_id) == "EXECUTED")
+    status, granted = pin(test_pin)
+    command_id = granted.get("commandId")
+    check("after restart: command + EXECUTED ACK flow again",
+          status == 202 and wait_for(lambda: command_status(admin, command_id) == "EXECUTED", 30), f"HTTP {status}")
+
+    door.stop()
+    check("closing the socket marks the door OFFLINE", wait_for(lambda: connection(admin) == "OFFLINE", 30))
 
     public = json.loads(Browser().send("GET", "/api/door-status", csrf=False)[1])
     check("anonymous kiosk status has no personal data", "Smoke Test" not in json.dumps(public) and "connection" in public)
@@ -242,21 +203,12 @@ def main():
     services = json.loads(output) if output.startswith("[") else [json.loads(line) for line in output.splitlines()]
     exposed = sorted({f"{s['Service']}:{p['PublishedPort']}" for s in services
                       for p in s.get("Publishers") or [] if p.get("PublishedPort")})
-    check("only web and mosquitto publish host ports (DB/AI/Core private)",
-          exposed and all(e.split(":")[0] in ("web", "mosquitto") for e in exposed), ", ".join(exposed))
+    check("only the HTTPS proxy publishes a host port (DB/AI/Core private, no broker)",
+          exposed and all(e.split(":")[0] == "web" for e in exposed), ", ".join(exposed))
 
-    door.client.loop_stop()
-    door.client.disconnect()
     failed = [name for name, ok in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
     sys.exit(1 if failed else 0)
-
-
-def form_file(data):
-    boundary = "smoke" + rnd.token_hex(6)
-    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"door.png\"\r\n"
-            f"Content-Type: image/png\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
-    return body, "multipart/form-data; boundary=" + boundary
 
 
 if __name__ == "__main__":

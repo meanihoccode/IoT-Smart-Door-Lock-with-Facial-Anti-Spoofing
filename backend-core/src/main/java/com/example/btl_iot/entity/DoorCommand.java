@@ -8,7 +8,7 @@ import java.time.Instant;
 @Table(name = "door_commands", indexes = @Index(name = "idx_door_commands_status_expiry", columnList = "status,expires_at"))
 public class DoorCommand {
     public enum Type { UNLOCK, LOCKDOWN_ON, LOCKDOWN_OFF }
-    // PUBLISHED = accepted by the broker only. EXECUTED = device drove the actuator; it does not prove the door moved.
+    // PUBLISHED = handed to the device WebSocket only. EXECUTED = device drove the actuator; it does not prove the door moved.
     public enum Status { PENDING, PUBLISHED, RECEIVED, EXECUTED, REJECTED, FAILED, UNKNOWN }
 
     @Id

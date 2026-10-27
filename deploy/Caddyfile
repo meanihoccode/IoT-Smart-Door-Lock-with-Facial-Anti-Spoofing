@@ -23,6 +23,11 @@
 		reverse_proxy core:8080
 	}
 
+	# Device command channel (wss). Caddy proxies the WebSocket upgrade; TLS ends here like for REST.
+	handle /ws/* {
+		reverse_proxy core:8080
+	}
+
 	handle {
 		root * /srv
 		try_files {path} /index.html

@@ -66,12 +66,8 @@ backend-core/uploads/**
 # Cloud deployment secrets and data (deploy/README.md)
 deploy/.env
 deploy/backups/
-deploy/mosquitto/config/passwd
-deploy/mosquitto/certs/*
-!deploy/mosquitto/certs/.gitkeep
 deploy/local/.env.local
 deploy/local/certs/
 deploy/local/secrets/
-deploy/local/mosquitto/
 
 CLAUDE.md

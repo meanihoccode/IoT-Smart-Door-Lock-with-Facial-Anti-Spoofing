@@ -31,11 +31,12 @@ public class SecurityConfig {
         provider.setPasswordEncoder(encoder);
         return new ProviderManager(provider);
     }
-    // Device API: bearer token per device, stateless, no cookies, so CSRF does not apply.
+    // Device REST API and the device WebSocket handshake: bearer token per device, stateless, no cookies,
+    // so CSRF does not apply. The handshake's authenticated principal becomes the WebSocket session identity.
     @Bean @Order(1) SecurityFilterChain deviceFilterChain(HttpSecurity http, DeviceRepository devices,
             AttemptLimiter limiter, SecurityAuditRepository audits) throws Exception {
         http
-            .securityMatcher("/api/device/**")
+            .securityMatcher("/api/device/**", "/ws/device")
             .csrf(csrf -> csrf.disable())
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .requestCache(cache -> cache.disable())

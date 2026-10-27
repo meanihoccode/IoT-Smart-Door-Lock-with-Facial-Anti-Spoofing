@@ -5,7 +5,7 @@ import com.example.btl_iot.entity.DoorCommand;
 import com.example.btl_iot.entity.DoorCommand.Status;
 import com.example.btl_iot.entity.DoorCommand.Type;
 import com.example.btl_iot.entity.SecurityAudit;
-import com.example.btl_iot.mqtt.MqttPublisher;
+import com.example.btl_iot.channel.DeviceChannel;
 import com.example.btl_iot.repository.*;
 import java.time.Clock;
 import java.time.Duration;
@@ -35,13 +35,13 @@ public class CommandService {
     private final DeviceRepository devices;
     private final AccessLogRepository logs;
     private final SecurityAuditRepository audits;
-    private final MqttPublisher mqtt;
+    private final DeviceChannel channel;
     private final Clock clock;
     private final Duration unlockTtl, lockdownTtl, ackGrace;
     private final int unlockMs;
 
     public CommandService(DoorCommandRepository commands, DeviceRepository devices, AccessLogRepository logs,
-                          SecurityAuditRepository audits, MqttPublisher mqtt, Clock clock,
+                          SecurityAuditRepository audits, DeviceChannel channel, Clock clock,
                           @Value("${smartlock.command.unlock-ttl:15s}") Duration unlockTtl,
                           @Value("${smartlock.command.lockdown-ttl:60s}") Duration lockdownTtl,
                           @Value("${smartlock.command.ack-grace:5s}") Duration ackGrace,
@@ -50,7 +50,7 @@ public class CommandService {
         if (unlockTtl.isNegative() || unlockTtl.isZero() || unlockTtl.compareTo(Duration.ofMinutes(1)) > 0)
             throw new IllegalArgumentException("smartlock.command.unlock-ttl must be within (0, 60s]");
         this.commands = commands; this.devices = devices; this.logs = logs; this.audits = audits;
-        this.mqtt = mqtt; this.clock = clock; this.unlockTtl = unlockTtl; this.lockdownTtl = lockdownTtl;
+        this.channel = channel; this.clock = clock; this.unlockTtl = unlockTtl; this.lockdownTtl = lockdownTtl;
         this.ackGrace = ackGrace; this.unlockMs = unlockMs;
     }
 
@@ -94,17 +94,18 @@ public class CommandService {
         if (command.getStatus() != Status.PENDING) return command;
         Instant now = clock.instant();
         if (!now.isBefore(command.getExpiresAt())) {
-            move(command, EnumSet.of(Status.PENDING), Status.FAILED, "EXPIRED_BEFORE_PUBLISH");
+            move(command, EnumSet.of(Status.PENDING), Status.FAILED, "EXPIRED_BEFORE_SEND");
         } else {
-            boolean sent = mqtt.publishCommand(command.getDeviceId(), payload(command));
-            move(command, EnumSet.of(Status.PENDING), sent ? Status.PUBLISHED : Status.FAILED, sent ? null : "PUBLISH_FAILED");
+            // PUBLISHED = handed to the device WebSocket; only the device ACK says more.
+            boolean sent = channel.send(command.getDeviceId(), payload(command));
+            move(command, EnumSet.of(Status.PENDING), sent ? Status.PUBLISHED : Status.FAILED, sent ? null : "SEND_FAILED");
         }
         return commands.findById(commandId).orElseThrow();
     }
 
     String payload(DoorCommand command) {
         var body = new java.util.LinkedHashMap<String, Object>();
-        body.put("v", 1); body.put("type", command.getType().name()); body.put("deviceId", command.getDeviceId());
+        body.put("v", 1); body.put("kind", "cmd"); body.put("type", command.getType().name()); body.put("deviceId", command.getDeviceId());
         body.put("commandId", command.getId()); body.put("seq", command.getSeq());
         body.put("issuedAt", command.getIssuedAt().getEpochSecond());
         body.put("expiresAt", command.getExpiresAt().getEpochSecond());
@@ -114,7 +115,7 @@ public class CommandService {
 
     public enum Ack { RECEIVED, EXECUTED, REJECTED }
 
-    // Device identity comes from the MQTT topic, which broker ACLs bind to the device credential.
+    // deviceId comes from the authenticated WebSocket session (device token), never from the message body.
     @Transactional
     public Status applyAck(String deviceId, String commandId, Ack ack, String reason) {
         DoorCommand command = commandId == null ? null : commands.findById(commandId).orElse(null);

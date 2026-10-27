@@ -1,12 +1,14 @@
 # Hợp đồng thiết bị và an toàn điều khiển
 
-Trạng thái: **v1 đã triển khai trong code (Core, firmware, simulator) ngày 26/10/2026; chưa nghiệm thu trên cloud thật hay phần cứng thật.** Mốc soạn yêu cầu: 25/10/2026. Đọc [DECISIONS](DECISIONS.md) trước khi đổi giao thức (D04, D10 đã chốt hướng). Các mục yêu cầu bên dưới vẫn là tiêu chí; mục [v1 đã triển khai](#v1-đã-triển-khai) mô tả API hiện hành.
+Trạng thái: **v2 (REST + WebSocket) đã triển khai trong code (Core, firmware, simulator) ngày 26/10/2026; chưa nghiệm thu trên cloud thật hay phần cứng thật.** Mốc soạn yêu cầu: 25/10/2026. Đọc [DECISIONS](DECISIONS.md) trước khi đổi giao thức (D04, D05, D10 đã chốt). Các mục yêu cầu bên dưới vẫn là tiêu chí; mục [v2 đã triển khai](#v2-đã-triển-khai) mô tả API hiện hành. v1 dùng MQTT; v2 giữ nguyên schema lệnh/ACK, chỉ đổi transport.
 
-## v1 đã triển khai
+## v2 đã triển khai
 
-Code: `backend-core/.../controller/DeviceController.java`, `service/CommandService.java`, `service/DeviceStateService.java`, `mqtt/*`, `security/Device*.java`; firmware `esp32/main/main.ino`; simulator `tools/device-simulator/`.
+Code: `backend-core/.../controller/DeviceController.java`, `service/CommandService.java`, `service/DeviceStateService.java`, `channel/*` (WebSocket), `config/WebSocketConfig.java`, `security/Device*.java`; firmware `esp32/main/main.ino`; simulator `tools/device-simulator/`.
 
-### HTTPS thiết bị → Core (chỉ đường này tạo được lệnh mở bằng mặt/PIN)
+Theo sơ đồ IoT Level 3 của môn học: **REST** cho dữ liệu thiết bị gửi lên (request–response), **WebSocket** cho kênh điều khiển hai chiều giữ liên tục (Exclusive Pair). Cả hai qua HTTPS cổng 443, cùng một token thiết bị.
+
+### REST qua HTTPS: thiết bị → Core (chỉ đường này tạo được lệnh mở bằng mặt/PIN)
 
 Mọi request `/api/device/**` phải có: `Authorization: Bearer <token>` (256 bit, Core chỉ lưu SHA-256), `X-Device-Id`, `X-Request-Id` (`[A-Za-z0-9-]{8,64}`, dùng một lần — trùng → `409`), `X-Request-Time` (epoch giây, lệch quá `±120s` → `400`). Chain bảo mật riêng, stateless, không cookie/CSRF. Sai token → `401` + audit `DEVICE_AUTH_FAILED`; 20 lần sai/5 phút/IP → `429`.
 
@@ -17,28 +19,32 @@ Mọi request `/api/device/**` phải có: `Authorization: Bearer <token>` (256 
 | `POST /api/device/alerts` | multipart `alertType` ∈ {`WRONG_PIN_3_TIMES`,`PIR_INTRUDER_5_TIMES`,`SECURITY_ALERT`}, `description` ≤ 200, `file` tùy chọn | `201`; ảnh chỉ admin đọc |
 | `GET /api/device/state` | — | `lockdown` mong muốn, `serverTime` |
 
-Phản hồi face/PIN: `decision` = `GRANTED`/`DENIED`, `reasonCode`, `requestId` (của thiết bị), `aiRequestId` (nếu có), và khi `GRANTED`: `commandId`, `commandStatus`. HTTP `202` = đã quyết định và đã gửi lệnh tới broker; `503 COMMAND_FAILED` = được phép nhưng không gửi được, cửa không mở. **Phản hồi HTTP không bao giờ làm firmware tự mở.**
+Phản hồi face/PIN: `decision` = `GRANTED`/`DENIED`, `reasonCode`, `requestId` (của thiết bị), `aiRequestId` (nếu có), và khi `GRANTED`: `commandId`, `commandStatus`. HTTP `202` = đã quyết định và đã ghi lệnh vào WebSocket của thiết bị; `503 COMMAND_FAILED` = được phép nhưng thiết bị không có socket mở hoặc ghi thất bại, cửa không mở. **Phản hồi REST không bao giờ làm firmware tự mở.**
 
 Trình duyệt không còn `/api/verify-face`, `/api/verify-pin` (bị `denyAll`). Admin mở từ xa: `POST /api/admin/door/open` (phiên admin + CSRF, audit `REMOTE_OPEN_REQUESTED`).
 
-### MQTT (TLS 8883 cho thiết bị; prefix `smartlock`)
+### WebSocket `wss://<domain>/ws/device` (kênh lệnh, hai chiều)
 
-| Topic | Hướng | QoS / retain | Payload JSON (`v:1`) |
-| --- | --- | --- | --- |
-| `smartlock/<id>/cmd` | Core → thiết bị | 1, **không retain** | `type` (`UNLOCK`/`LOCKDOWN_ON`/`LOCKDOWN_OFF`), `deviceId`, `commandId` (UUID), `seq`, `issuedAt`, `expiresAt` (epoch s), `unlockMs` |
-| `smartlock/<id>/ack` | thiết bị → Core | 0 (giới hạn PubSubClient) | `deviceId`, `commandId`, `seq`, `ack` (`RECEIVED`/`EXECUTED`/`REJECTED`), `reason`, `eventId`, `ts` |
-| `smartlock/<id>/event` | thiết bị → Core | 0 | `eventId`, `type` (`BOOT`, `DOOR_LOCKED`, `PIR_MOTION`, `KEYPAD_LOCKOUT`, `FACE_FAIL_STREAK`), `commandId?`, `ts` |
-| `smartlock/<id>/status` | thiết bị → Core | 0, retain; LWT retain `online:false` | `online`, `lockdown`, `unlocked`, `fw`, `rssi`; heartbeat 60 s |
+Bắt tay WebSocket đi qua cùng chain bảo mật với REST: header `Authorization: Bearer <token>` + `X-Device-Id`; sai/thiếu → HTTP `401`, không nâng cấp kết nối. Có header `Origin` khác origin của server (trang web) → `403` dù token đúng; firmware không gửi `Origin`. Danh tính của socket là thiết bị đã xác thực lúc bắt tay; nội dung bản tin không đổi được danh tính. Mỗi thiết bị một socket: kết nối mới thay và đóng socket cũ. Firmware ping 15 s (2 lần mất pong → đóng và tự kết nối lại sau 5 s); Core đóng socket im lặng quá `90s`. Socket mở = `ONLINE`; socket đóng = `OFFLINE` (tương đương LWT), và lần kết nối mới coi lockdown là “chưa rõ” cho tới khi thiết bị báo lại.
 
-Danh tính trên MQTT là topic: ACL Mosquitto (`deploy/mosquitto/config/acl`) chỉ cho user `<id>` đọc `cmd` và ghi `ack/event/status` của chính nó; chỉ user `core` ghi `cmd`. Core bỏ qua payload có `deviceId` khác topic (audit `DEVICE_ID_MISMATCH`) và ACK cho command không thuộc thiết bị (audit `ACK_UNKNOWN_COMMAND`).
+Mọi bản tin là JSON text frame `v:1` có trường `kind`:
 
-Tham số mặc định (cấu hình được, có kiểm tra): TTL mở `15s`, TTL lockdown `60s`, `unlockMs` `7000` (1000–15000; firmware tự kẹp ≤ 15000), ân hạn ACK `5s`, stale sau `180s`.
+| `kind` | Hướng | Trường |
+| --- | --- | --- |
+| `cmd` | Core → thiết bị | `type` (`UNLOCK`/`LOCKDOWN_ON`/`LOCKDOWN_OFF`), `deviceId`, `commandId` (UUID), `seq`, `issuedAt`, `expiresAt` (epoch s), `unlockMs` |
+| `ack` | thiết bị → Core | `deviceId`, `commandId`, `seq`, `ack` (`RECEIVED`/`EXECUTED`/`REJECTED`), `reason`, `eventId`, `ts` |
+| `event` | thiết bị → Core | `eventId`, `type` (`BOOT`, `DOOR_LOCKED`, `PIR_MOTION`, `KEYPAD_LOCKOUT`, `FACE_FAIL_STREAK`), `commandId?`, `ts` |
+| `status` | thiết bị → Core | `lockdown`, `unlocked`, `fw`, `rssi`; gửi khi kết nối và mỗi 60 s |
+
+Core bỏ qua bản tin `cmd` do thiết bị gửi lên, payload có `deviceId` khác danh tính socket (audit `DEVICE_ID_MISMATCH`) và ACK cho command không thuộc thiết bị (audit `ACK_UNKNOWN_COMMAND`). Firmware chỉ xử lý frame `kind:"cmd"`. Không có cơ chế “retain”: lệnh chỉ được ghi vào socket đang mở tại thời điểm gửi; thiết bị offline thì lệnh `FAILED`, không xếp hàng chờ.
+
+Tham số mặc định (cấu hình được, có kiểm tra): TTL mở `15s`, TTL lockdown `60s`, `unlockMs` `7000` (1000–15000; firmware tự kẹp ≤ 15000), ân hạn ACK `5s`, stale sau `180s`, idle WebSocket `90s`.
 
 ### Trạng thái command (bảng `door_commands`)
 
-`PENDING → PUBLISHED → RECEIVED → EXECUTED`; nhánh `REJECTED` (thiết bị từ chối, có `statusReason`), `FAILED` (không publish được / hết hạn trước khi publish), `UNKNOWN` (quá `expiresAt + ân hạn` mà chưa có `EXECUTED`). Chuyển trạng thái bằng compare-and-set nên ACK trùng/sai thứ tự không làm lùi trạng thái; `EXECUTED`/`REJECTED` đến muộn vẫn được ghi đè lên `UNKNOWN`. Lệnh hết hạn **không bao giờ được gửi lại**. `access_logs.status` phản chiếu `COMMAND_<STATUS>`.
+`PENDING → PUBLISHED → RECEIVED → EXECUTED` (`PUBLISHED` giữ tên từ v1 để tương thích dữ liệu; nghĩa là đã ghi vào WebSocket của thiết bị); nhánh `REJECTED` (thiết bị từ chối, có `statusReason`), `FAILED` (`SEND_FAILED` / `EXPIRED_BEFORE_SEND`), `UNKNOWN` (quá `expiresAt + ân hạn` mà chưa có `EXECUTED`). Chuyển trạng thái bằng compare-and-set nên ACK trùng/sai thứ tự không làm lùi trạng thái; `EXECUTED`/`REJECTED` đến muộn vẫn được ghi đè lên `UNKNOWN`. Lệnh hết hạn **không bao giờ được gửi lại**. `access_logs.status` phản chiếu `COMMAND_<STATUS>`.
 
-Core tạo command trong transaction có khóa hàng hồ sơ + thiết bị (kiểm tra lockdown, cấp `seq`), commit rồi mới publish (ACK sớm luôn tìm thấy hàng). `seq = max(seq_trước + 1, epoch_ms)` nên đơn điệu cả khi khôi phục DB từ backup.
+Core tạo command trong transaction có khóa hàng hồ sơ + thiết bị (kiểm tra lockdown, cấp `seq`), commit rồi mới gửi qua WebSocket (ACK sớm luôn tìm thấy hàng). `seq = max(seq_trước + 1, epoch_ms)` nên đơn điệu cả khi khôi phục DB từ backup.
 
 ### Firmware chấp nhận command
 
@@ -55,7 +61,7 @@ Core tạo command trong transaction có khóa hàng hồ sơ + thiết bị (ki
 - Webcam kiosk chỉ phục vụ enrollment hoặc nghiệp vụ admin đã đăng nhập. Ảnh webcam không được tạo command mở khóa, kể cả khi nhận diện/liveness thành công.
 - Kiểm tra phía server; endpoint enrollment không có side effect mở cửa. Có test gọi trực tiếp endpoint với ảnh/browser request.
 - PIN phải có contract riêng cho keypad/kiosk, ghi tại D04. Không tự đưa khóa thiết bị vào JavaScript để giữ luồng cũ.
-- Core kiểm tra hồ sơ enabled và quyền hiện tại. AI không có quyền publish command.
+- Core kiểm tra hồ sơ enabled và quyền hiện tại. AI không có quyền tạo hoặc gửi command.
 
 ## Trường bản tin cần chốt
 
@@ -74,16 +80,16 @@ Trường định danh không thay thế xác thực. Giới hạn độ dài, p
 2. Không retain command mở khóa. Lệnh cũ khi reconnect/reboot không được thực thi.
 3. Dedup bằng command ID, không dùng cửa sổ 6 giây. Chốt phạm vi bộ nhớ, giới hạn và chống replay qua reboot trước khi nghiệm thu. Không để khởi động lại xóa bảo vệ lệnh cũ.
 4. Không gia hạn timer mở khi nhận command trùng. Có thể gửi lại ACK cho command đã xử lý.
-5. QoS không thay thế dedup. Kiểm tra publish/subscribe QoS thực tế của PubSubClient trong repo; không hứa exactly-once.
+5. Độ tin cậy của transport (TCP/WebSocket) không thay thế dedup; socket rớt có thể làm mất frame. Không hứa exactly-once.
 6. Trạng thái mục tiêu: `PENDING -> PUBLISHED -> RECEIVED -> EXECUTED`; nhánh lỗi `FAILED/EXPIRED/UNKNOWN`. Chốt transition hợp lệ, event trùng/sai thứ tự và lưu bền vững.
-7. Publish chỉ là gửi tới broker. ACK nhận không phải ACK thực thi. Relay/servo được điều khiển không chứng minh cửa vật lý đã mở nếu không có cảm biến.
+7. Gửi lệnh chỉ là ghi vào kênh tới thiết bị. ACK nhận không phải ACK thực thi. Relay/servo được điều khiển không chứng minh cửa vật lý đã mở nếu không có cảm biến.
 8. ACK mất/timeout phải hiện pending/unknown, không tự tạo command mới. Retry nếu có chỉ dùng cùng ID, còn hạn và có dedup.
 9. Không giữ transaction/row lock chờ ACK. Khi DB/publish gián đoạn, fail an toàn và ghi trạng thái có thể giải thích. Transactional outbox là cải tiến P1, không bắt buộc cho bản tối thiểu.
 
 ## Kết nối, lockdown và an toàn — bắt buộc
 
-- TLS xác minh CA/hostname, credential riêng, ACL đúng topic. Không `setInsecure()` hoặc trust-all.
-- Kết nối lần đầu thất bại vẫn có retry có giới hạn/backoff; reconnect phải resubscribe. Dùng heartbeat/LWT và mốc last-seen để phân biệt online/offline/stale.
+- TLS xác minh CA/hostname, credential riêng cho từng thiết bị; danh tính kênh lệnh gắn với credential (không theo nội dung bản tin). Không `setInsecure()` hoặc trust-all.
+- Kết nối lần đầu thất bại vẫn có retry có giới hạn/backoff; kết nối lại phải khôi phục kênh lệnh. Dùng heartbeat/ping, sự kiện đóng kết nối và mốc last-seen để phân biệt online/offline/stale.
 - Persist trạng thái lockdown mong muốn; phân biệt thiết bị đã xác nhận/chưa xác nhận. Offline không được báo áp dụng thành công. Kiểm tra lockdown ngay trước actuation.
 - Mất mạng/cloud/AI/DB không mở khóa hoặc bypass liveness. Bỏ master PIN mặc định; recovery offline mới ngoài phạm vi.
 - Timer khóa lại không bị upload HTTP, beep hoặc reconnect blocking vô hiệu hóa. Có timeout phù hợp; xem xét watchdog theo lỗi thực tế.

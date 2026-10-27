@@ -4,9 +4,10 @@
  * Bo mạch: ESP32-S3 WROOM N16R8 CAM (16MB Flash, 8MB Octal PSRAM, OV2640)
  * Vai trò: nút local duy nhất. Thu ảnh/PIN/cảm biến và điều khiển chấp hành;
  * liveness, nhận diện và quyết định nghiệp vụ chạy trên cloud.
- *   - HTTPS (xác thực thiết bị): gửi ảnh khuôn mặt, PIN keypad, cảnh báo có ảnh
- *   - MQTT TLS: nhận command JSON (commandId/seq/TTL), gửi ACK, trạng thái, sự kiện
- *   - Chỉ mở khóa khi nhận command hợp lệ qua MQTT (docs/DEVICE_CONTRACT.md)
+ *   - REST qua HTTPS (xác thực thiết bị): gửi ảnh khuôn mặt, PIN keypad, cảnh báo có ảnh
+ *   - WebSocket bảo mật (wss, kết nối giữ liên tục): nhận command JSON (commandId/seq/TTL),
+ *     gửi ACK, trạng thái, sự kiện — đúng sơ đồ IoT Level 3 "REST/WebSocket"
+ *   - Chỉ mở khóa khi nhận command hợp lệ qua WebSocket (docs/DEVICE_CONTRACT.md)
  *   - Bàn phím 4x4 (PIN 6 số, phím 'D' gọi chuông/quét mặt), cảm biến PIR
  *   - Khóa khẩn cấp lưu NVS; timer khóa lại chạy bằng esp_timer độc lập vòng loop
  *   - Không có master PIN, không có web server LAN, không log bí mật
@@ -17,11 +18,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#if __has_include("PubSubClient.h")
-#include "PubSubClient.h"
-#else
-#include <PubSubClient.h>
-#endif
+#include <WebSocketsClient.h> // thư viện "WebSockets" (Markus Sattler) 2.7.2
 #include "esp_camera.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -49,14 +46,15 @@
 #ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #endif
-#ifndef API_BASE_URL
-#define API_BASE_URL "https://smartlock.example.com"
+// Một tên miền cloud cho cả REST (https://CLOUD_HOST:CLOUD_PORT/api/...) và WebSocket (wss://.../ws/device).
+#ifndef CLOUD_HOST
+#define CLOUD_HOST "smartlock.example.com"
 #endif
-#ifndef MQTT_HOST
-#define MQTT_HOST "smartlock.example.com"
+#ifndef CLOUD_PORT
+#define CLOUD_PORT 443
 #endif
-#ifndef MQTT_PORT
-#define MQTT_PORT 8883
+#ifndef WS_PATH
+#define WS_PATH "/ws/device"
 #endif
 #ifndef DEVICE_ID
 #define DEVICE_ID "door-01"
@@ -64,29 +62,14 @@
 #ifndef DEVICE_TOKEN
 #define DEVICE_TOKEN ""
 #endif
-#ifndef MQTT_USERNAME
-#define MQTT_USERNAME DEVICE_ID
-#endif
-#ifndef MQTT_PASSWORD
-#define MQTT_PASSWORD ""
-#endif
 #ifndef NTP_SERVER
 #define NTP_SERVER "pool.ntp.org"
-#endif
-#ifndef TOPIC_PREFIX
-#define TOPIC_PREFIX "smartlock"
 #endif
 #ifndef SMARTLOCK_HAS_ROOT_CA
 static const char ROOT_CA_PEM[] = "";
 #endif
 
-#define FW_VERSION "2.0.0-l3"
-
-const char* TOPIC_CMD    = TOPIC_PREFIX "/" DEVICE_ID "/cmd";
-const char* TOPIC_ACK    = TOPIC_PREFIX "/" DEVICE_ID "/ack";
-const char* TOPIC_EVENT  = TOPIC_PREFIX "/" DEVICE_ID "/event";
-const char* TOPIC_STATUS = TOPIC_PREFIX "/" DEVICE_ID "/status";
-const char* STATUS_OFFLINE = "{\"v\":1,\"deviceId\":\"" DEVICE_ID "\",\"online\":false}";
+#define FW_VERSION "2.1.0-l3-ws"
 
 // Thời gian điều khiển
 const unsigned long DEFAULT_UNLOCK_MS      = 7000;  // Dùng khi command không ghi unlockMs
@@ -175,11 +158,12 @@ public:
 
 ESP32Keypad keypad = ESP32Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// Đối tượng Servo, MQTT TLS và NVS
+// Đối tượng Servo, WebSocket bảo mật và NVS
 Servo doorServo;
-WiFiClientSecure mqttNet;
-PubSubClient mqttClient(mqttNet);
+WebSocketsClient ws;
 Preferences prefs;
+bool wsStarted   = false; // begin() chỉ gọi một lần; thư viện tự kết nối lại
+bool wsConnected = false;
 bool cameraReady = false;
 bool caConfigured = false;
 
@@ -196,8 +180,6 @@ unsigned long doorUnlockTime   = 0;
 unsigned long activeUnlockMs   = DEFAULT_UNLOCK_MS;
 unsigned long lockoutStartTime = 0;
 unsigned long lastPirTrigger   = 0;
-unsigned long lastMqttAttempt  = 0;
-unsigned long mqttBackoffMs    = 5000;
 unsigned long lastHeartbeat    = 0;
 unsigned long awaitCommandUntil = 0;
 unsigned long pirWarmupEnd     = 0;
@@ -281,7 +263,7 @@ String u64ToString(uint64_t value) {
 }
 
 // ============================================================================
-// CHẤP HÀNH: MỞ KHÓA / KHÓA LẠI (timer khóa lại độc lập với HTTP/MQTT blocking)
+// CHẤP HÀNH: MỞ KHÓA / KHÓA LẠI (timer khóa lại độc lập với HTTPS/WebSocket blocking)
 // ============================================================================
 void actuateLocked() {
   doorServo.write(SERVO_LOCK_ANGLE);
@@ -339,28 +321,31 @@ void lockNow() {
 }
 
 // ============================================================================
-// MQTT: ACK, SỰ KIỆN, TRẠNG THÁI (PubSubClient chỉ publish QoS 0)
+// WEBSOCKET: ACK, SỰ KIỆN, TRẠNG THÁI (mọi bản tin có "kind"; Core lấy danh tính từ token lúc bắt tay)
 // ============================================================================
+bool wsSend(String& json) {
+  if (!wsConnected) return false;
+  return ws.sendTXT(json);
+}
+
 void publishEvent(const char* type, const String& commandId = "") {
-  if (!mqttClient.connected()) return;
-  String json = String("{\"v\":1,\"deviceId\":\"") + DEVICE_ID + "\",\"eventId\":\"" + randomId()
+  String json = String("{\"v\":1,\"kind\":\"event\",\"deviceId\":\"") + DEVICE_ID + "\",\"eventId\":\"" + randomId()
               + "\",\"type\":\"" + type + "\",\"ts\":" + String((uint32_t)time(nullptr));
   if (commandId.length() > 0) json += ",\"commandId\":\"" + commandId + "\"";
   json += "}";
-  mqttClient.publish(TOPIC_EVENT, json.c_str());
+  wsSend(json);
 }
 
 void publishStatus() {
-  if (!mqttClient.connected()) return;
-  String json = String("{\"v\":1,\"deviceId\":\"") + DEVICE_ID + "\",\"online\":true,\"lockdown\":"
+  String json = String("{\"v\":1,\"kind\":\"status\",\"deviceId\":\"") + DEVICE_ID + "\",\"lockdown\":"
               + (isEmergencyLockdown ? "true" : "false") + ",\"unlocked\":" + (isDoorUnlocked ? "true" : "false")
               + ",\"fw\":\"" FW_VERSION "\",\"rssi\":" + String(WiFi.RSSI()) + "}";
-  mqttClient.publish(TOPIC_STATUS, json.c_str(), true);
+  wsSend(json);
   lastHeartbeat = millis();
 }
 
 String ackJson(const String& commandId, uint64_t seq, const char* ack, const char* reason) {
-  String json = String("{\"v\":1,\"deviceId\":\"") + DEVICE_ID + "\",\"commandId\":\"" + commandId
+  String json = String("{\"v\":1,\"kind\":\"ack\",\"deviceId\":\"") + DEVICE_ID + "\",\"commandId\":\"" + commandId
               + "\",\"seq\":" + u64ToString(seq) + ",\"ack\":\"" + ack + "\",\"eventId\":\"" + randomId()
               + "\",\"ts\":" + String((uint32_t)time(nullptr));
   if (reason && reason[0]) json += String(",\"reason\":\"") + reason + "\"";
@@ -369,7 +354,7 @@ String ackJson(const String& commandId, uint64_t seq, const char* ack, const cha
 
 void sendAck(const String& commandId, uint64_t seq, const char* ack, const char* reason = "") {
   String json = ackJson(commandId, seq, ack, reason);
-  if (mqttClient.connected()) mqttClient.publish(TOPIC_ACK, json.c_str());
+  wsSend(json);
   Serial.printf("[ACK] %s %s %s\n", commandId.c_str(), ack, reason ? reason : "");
   // Chỉ lưu ACK cuối của command đã chấp nhận; ACK từ chối REPLAY/MALFORMED không được ghi đè.
   if (strcmp(ack, "RECEIVED") != 0 && commandId == lastCmdId) {
@@ -398,7 +383,7 @@ void handleCommand(const String& message) {
   // Trùng commandId: chỉ gửi lại ACK cũ, không chấp hành lại, không gia hạn.
   if (commandId == lastCmdId) {
     Serial.println("[CMD] Command trùng, gửi lại ACK cũ.");
-    if (lastAckJson.length() > 0 && mqttClient.connected()) mqttClient.publish(TOPIC_ACK, lastAckJson.c_str());
+    if (lastAckJson.length() > 0) wsSend(lastAckJson);
     return;
   }
   if (seq <= lastSeq) {
@@ -441,30 +426,47 @@ void handleCommand(const String& message) {
   }
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  if (length > 700 || strcmp(topic, TOPIC_CMD) != 0) return;
-  String message;
-  message.reserve(length);
-  for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
-  handleCommand(message);
+void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      // Socket mở = online với Core; báo ngay lockdown hiện tại để Core đồng bộ lại nếu lệch.
+      wsConnected = true;
+      Serial.println("[WS] Đã kết nối wss tới cloud.");
+      publishStatus();
+      if (!bootEventSent) { publishEvent("BOOT"); bootEventSent = true; }
+      break;
+    case WStype_DISCONNECTED:
+      if (wsConnected) Serial.println("[WS] Mất kết nối cloud; thư viện sẽ tự kết nối lại.");
+      wsConnected = false;
+      break;
+    case WStype_TEXT: {
+      if (length > 700) return;
+      String message;
+      message.reserve(length);
+      for (size_t i = 0; i < length; i++) message += (char)payload[i];
+      String kind;
+      // Chỉ bản tin "cmd" từ Core mới được xử lý như lệnh.
+      if (jsonString(message, "kind", kind) && kind == "cmd") handleCommand(message);
+      break;
+    }
+    default:
+      break;
+  }
 }
 
-void connectMqtt() {
-  if (!caConfigured || !timeSynced()) return; // TLS cần CA và đồng hồ đúng để kiểm chứng chứng chỉ
-  if (millis() - lastMqttAttempt < mqttBackoffMs) return;
-  lastMqttAttempt = millis();
-  Serial.print("[MQTT] Đang kết nối TLS tới broker...");
-  // Clean session + LWT retained: broker báo offline khi mất kết nối; command cũ không được giữ lại.
-  if (mqttClient.connect(DEVICE_ID, MQTT_USERNAME, MQTT_PASSWORD, TOPIC_STATUS, 1, true, STATUS_OFFLINE, true)) {
-    Serial.println(" Thành công!");
-    mqttBackoffMs = 5000;
-    mqttClient.subscribe(TOPIC_CMD, 1);
-    publishStatus();
-    if (!bootEventSent) { publishEvent("BOOT"); bootEventSent = true; }
-  } else {
-    Serial.printf(" Thất bại, mã lỗi=%d\n", mqttClient.state());
-    mqttBackoffMs = min(mqttBackoffMs * 2, 60000UL);
-  }
+// TLS cần CA và đồng hồ đúng để kiểm chứng chứng chỉ; chưa đủ điều kiện thì chưa kết nối.
+// Thư viện chỉ setInsecure() khi không có CA, nên tuyệt đối không gọi begin khi thiếu CA.
+void startWebSocket() {
+  if (wsStarted || !caConfigured || !timeSynced() || strlen(DEVICE_TOKEN) == 0) return;
+  // Thay header mặc định "Origin: file://" bằng danh tính thiết bị (không log ra Serial).
+  static String headers = String("Authorization: Bearer ") + DEVICE_TOKEN + "\r\nX-Device-Id: " + DEVICE_ID;
+  ws.setExtraHeaders(headers.c_str());
+  ws.onEvent(wsEvent);
+  ws.setReconnectInterval(5000);
+  ws.enableHeartbeat(15000, 5000, 2); // ping 15s; 2 lần không có pong thì đóng và kết nối lại
+  ws.beginSslWithCA(CLOUD_HOST, CLOUD_PORT, WS_PATH, ROOT_CA_PEM, "");
+  wsStarted = true;
+  Serial.println("[WS] Bắt đầu kết nối wss://" CLOUD_HOST WS_PATH);
 }
 
 // ============================================================================
@@ -581,8 +583,12 @@ void syncClock(unsigned long waitMs) {
 }
 
 // ============================================================================
-// HTTPS TỚI CLOUD CORE (Bearer token thiết bị + request ID dùng một lần)
+// REST QUA HTTPS TỚI CLOUD CORE (Bearer token thiết bị + request ID dùng một lần)
 // ============================================================================
+String apiUrl(const String& path) {
+  return String("https://") + CLOUD_HOST + (CLOUD_PORT == 443 ? String("") : ":" + String(CLOUD_PORT)) + path;
+}
+
 int deviceRequest(const String& path, const String& contentType, uint8_t* body, size_t length,
                   uint32_t timeoutMs, String& response) {
   response = "";
@@ -590,7 +596,7 @@ int deviceRequest(const String& path, const String& contentType, uint8_t* body, 
   WiFiClientSecure net;
   net.setCACert(ROOT_CA_PEM); // Kiểm chứng CA và hostname; không dùng setInsecure()
   HTTPClient http;
-  if (!http.begin(net, String(API_BASE_URL) + path)) return -1;
+  if (!http.begin(net, apiUrl(path))) return -1;
   http.setConnectTimeout(5000);
   http.setTimeout(timeoutMs);
   http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
@@ -686,9 +692,9 @@ Decision verifyPinWithBackend(const String& pin) {
   return decisionFrom(code, response);
 }
 
-// Cloud đã chấp thuận: cửa chỉ mở khi command MQTT tới; đèn báo đang chờ.
+// Cloud đã chấp thuận: cửa chỉ mở khi command WebSocket tới; đèn báo đang chờ.
 void onGranted() {
-  Serial.println("[CLOUD] Đã chấp thuận, chờ command mở khóa qua MQTT...");
+  Serial.println("[CLOUD] Đã chấp thuận, chờ command mở khóa qua WebSocket...");
   awaitCommandUntil = millis() + AWAIT_COMMAND_MS;
   digitalWrite(PIN_LED, HIGH);
   beep(1, 60);
@@ -847,13 +853,8 @@ void setup() {
   connectWiFi();
   if (WiFi.status() == WL_CONNECTED) syncClock(10000);
 
-  // 3. Cấu hình MQTT TLS (CA + hostname kiểm chứng; không setInsecure)
-  mqttNet.setCACert(ROOT_CA_PEM);
-  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
-  mqttClient.setCallback(mqttCallback);
-  mqttClient.setBufferSize(768);
-  mqttClient.setKeepAlive(30);       // HTTP blocking tối đa 15s vẫn nằm trong 1.5 x keepalive
-  mqttClient.setSocketTimeout(10);
+  // 3. Kênh lệnh WebSocket bảo mật (CA + hostname kiểm chứng; không setInsecure)
+  startWebSocket();
 
   // Ổn định cảm biến PIR trong 10 giây
   pirWarmupEnd = millis() + 10000;
@@ -888,10 +889,10 @@ void loop() {
     }
   } else {
     if (!timeSynced() && now - lastClockRetry >= 30000) { lastClockRetry = now; syncClock(2000); }
-    if (!mqttClient.connected()) connectMqtt();
-    else {
-      mqttClient.loop();
-      if (millis() - lastHeartbeat >= HEARTBEAT_MS) publishStatus();
+    startWebSocket();
+    if (wsStarted) {
+      ws.loop(); // nhận lệnh, gửi ping, tự kết nối lại
+      if (wsConnected && millis() - lastHeartbeat >= HEARTBEAT_MS) publishStatus();
     }
   }
 

@@ -99,7 +99,7 @@ public class FaceGateway {
                 throw invalid(result);
             return new FaceMatch(id.asLong(), false, "FACE_VERIFIED", requestId(result));
         } catch (AiFailure failure) {
-            // Return a denial so DoorAccessService records the failed attempt, never publishes MQTT.
+            // Return a denial so DoorAccessService records the failed attempt, never creates a command.
             return FaceMatch.rejected(failure.reasonCode(), failure.requestId());
         }
     }

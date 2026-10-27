@@ -14,7 +14,7 @@ Dự án được chia thành 4 module độc lập:
    - Cung cấp các API RESTful cho Frontend (Dashboard, Quản lý Nhân Viên).
    - Lưu trữ dữ liệu lịch sử và thông tin người dùng vào **MySQL**.
    - Giao tiếp với `backend-ai` để phân tích khuôn mặt.
-   - Giao tiếp với thiết bị `esp32` thông qua giao thức **MQTT**.
+   - Giao tiếp với thiết bị `esp32` theo sơ đồ IoT Level 3: **REST** (HTTPS) cho ảnh/PIN/cảnh báo và **WebSocket** (`wss://.../ws/device`) cho lệnh, ACK, trạng thái.
 2. **`backend-ai` (Python FastAPI)**: Là máy chủ chuyên xử lý AI. Nhiệm vụ:
    - Sử dụng **InsightFace (RetinaFace + ArcFace)** để trích xuất đặc trưng khuôn mặt (Face Embedding 512 chiều) và so sánh Cosine Similarity.
    - Sử dụng **MiniFASNet (Silent-Face-Anti-Spoofing)** để kiểm tra Liveness Detection (Chống giả mạo bằng cách giơ ảnh từ điện thoại hoặc mặt nạ giấy).
@@ -24,8 +24,8 @@ Dự án được chia thành 4 module độc lập:
    - Quản lý danh sách nhân viên: Xem phương thức mở khóa, ngày hoạt động cuối cùng.
    - Thêm nhân viên: Gọi API để trích xuất đặc trưng mặt và cấp quyền.
 4. **`esp32` (C/C++ Arduino)**: Code nạp cho vi điều khiển. Nhiệm vụ:
-   - Lắng nghe lệnh mở cửa `OPEN_DOOR` từ broker MQTT (topic `iot/lock/commands`) để bật Relay/Servo mở chốt cửa.
-   - Theo dõi cảm biến chuyển động PIR và gửi dữ liệu về topic `iot/lock/events` nếu phát hiện có người đến gần cửa.
+   - Gửi ảnh khuôn mặt (PIR hoặc phím D) và PIN keypad lên cloud bằng REST có xác thực thiết bị.
+   - Giữ một WebSocket bảo mật tới cloud: nhận lệnh có `commandId`/TTL, chấp hành relay/servo, gửi ACK và sự kiện (PIR, khóa lại, cảnh báo).
 
 ## 🚀 Hướng Dẫn Cài Đặt
 
@@ -42,7 +42,7 @@ Bản tích hợp AI mới và bảo mật đợt 2: xem [các thay đổi, hợ
 - Python 3.11 (đã kiểm tra)
 - Node.js 20.19+ thuộc nhánh 20, hoặc từ 22.12 trở lên
 - MySQL Server (Port 3306)
-- MQTT Broker (VD: Eclipse Mosquitto - Port 1883)
+- Không cần MQTT broker: kênh lệnh là WebSocket do Backend Core phục vụ.
 
 ### 1. Database MySQL
 - Tạo một database trong MySQL với tên `btl_iot`.
@@ -50,8 +50,8 @@ Bản tích hợp AI mới và bảo mật đợt 2: xem [các thay đổi, hợ
 - Điền thông tin MySQL của máy bạn trong hai file local; Java và Python phải dùng cùng database. Không sửa mật khẩu trực tiếp trong mã nguồn hoặc commit file local.
 - Hướng dẫn Windows và quy tắc cấu hình dùng chung: [SETUP_WINDOWS.md](SETUP_WINDOWS.md).
 
-### 2. MQTT Broker
-- Cài đặt và khởi chạy Mosquitto MQTT Broker trên máy tính ở cổng `1883`.
+### 2. Credential thiết bị
+- Chạy `sh deploy/scripts/new-device-credentials.sh door-01`; đặt `SMARTLOCK_DEVICE_TOKEN_SHA256` cho Core và token cho `esp32/config.h`.
 
 ### 3. Backend Core (Java)
 Di chuyển vào thư mục `backend-core` và chạy lệnh sau để build và khởi động:
@@ -83,17 +83,17 @@ npm run dev
 *Trang web sẽ chạy tại địa chỉ được sinh ra (thường là `http://localhost:5173`).*
 
 ### 6. Phần cứng (ESP32)
-- Mở sketch `esp32/main/main.ino` bằng Arduino IDE (đã kèm `PubSubClient`).
+- Mở sketch `esp32/main/main.ino` bằng Arduino IDE; cài thư viện Keypad, ESP32Servo và WebSockets (Markus Sattler) 2.7.2.
 - Copy `esp32/config.example.h` thành `esp32/config.h`, điền Wi-Fi, URL cloud, credential thiết bị và root CA trong file local này (xem [deploy/README.md](deploy/README.md)).
 - Biên dịch bằng `scripts/Compile-Esp32.ps1 -Fqbn '<FQBN đã xác minh cho ESP32-S3 N16R8>'`; script chỉ compile, không nạp.
-- Thiết bị chỉ mở khóa khi nhận command hợp lệ qua MQTT TLS; không còn master PIN hay web server camera LAN. Kiosk web chỉ hiển thị trạng thái.
+- Thiết bị chỉ mở khóa khi nhận command hợp lệ qua WebSocket bảo mật; không còn master PIN hay web server camera LAN. Kiosk web chỉ hiển thị trạng thái.
 
 ### 7. Triển khai cloud (IoT Level 3)
-Bộ Docker Compose, Caddy (HTTPS), Mosquitto (TLS + ACL) và runbook nằm trong [deploy/](deploy/README.md). Hợp đồng thiết bị: [docs/DEVICE_CONTRACT.md](docs/DEVICE_CONTRACT.md); trạng thái nghiệm thu: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
+Bộ Docker Compose, Caddy (HTTPS cho REST, WebSocket và app; chỉ mở cổng 443) và runbook nằm trong [deploy/](deploy/README.md). Hợp đồng thiết bị: [docs/DEVICE_CONTRACT.md](docs/DEVICE_CONTRACT.md); trạng thái nghiệm thu: [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md).
 
 ---
 ## ✨ Tính năng nổi bật
 - **Anti-Spoofing (Liveness Detection)**: Hệ thống sử dụng mô hình học sâu để kiểm tra xem khuôn mặt là thực hay là hình ảnh giả mạo chụp từ màn hình/giấy.
 - **Microservices Architecture**: Tách rời Backend quản trị logic (Spring Boot) và Backend AI (FastAPI) để tối ưu hiệu năng.
-- **MQTT Messaging**: Điều khiển IoT realtime, không phụ thuộc vào IP nội bộ (nếu broker đưa lên Cloud).
+- **REST + WebSocket (IoT Level 3)**: Thiết bị gửi dữ liệu bằng REST và nhận lệnh realtime qua WebSocket bảo mật tới cloud, không phụ thuộc IP nội bộ.
 - **Dashboard thời gian thực**: Sử dụng giao diện hiện đại (TailwindCSS) hiển thị thông kê người dùng trực quan.

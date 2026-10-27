@@ -1,19 +1,18 @@
-"""ESP32 door-node simulator speaking docs/DEVICE_CONTRACT.md v1 (HTTPS + MQTT over TLS).
+"""ESP32 door-node simulator speaking docs/DEVICE_CONTRACT.md v2 (REST over HTTPS + WebSocket over TLS).
 
 Evidence produced with it is "cloud staging with simulator", never "real hardware".
 
-    pip install paho-mqtt==2.1.0
-    python device_simulator.py --api https://smartlock.example.com --mqtt-host smartlock.example.com \
-        --device-id door-01 --token-file token.txt --mqtt-password-file mqtt.txt pin 123456
+    pip install websocket-client==1.8.0
+    python device_simulator.py --cloud https://smartlock.example.com --device-id door-01 \
+        --token-file token.txt pin 123456
     ... face path/to/photo.jpg | listen
 
-Secrets are read from files so they never appear in shell history or process listings.
+The token is read from a file so it never appears in shell history or process listings.
 """
 import argparse
 import json
 import secrets
 import ssl
-import sys
 import threading
 import time
 import urllib.error
@@ -47,7 +46,7 @@ class CommandProcessor:
                                                    "lockdown": self.lockdown, "lastAck": self.last_ack}))
 
     def _ack(self, command_id, seq, ack, reason=None):
-        body = {"v": 1, "deviceId": self.device_id, "commandId": command_id, "seq": seq, "ack": ack,
+        body = {"v": 1, "kind": "ack", "deviceId": self.device_id, "commandId": command_id, "seq": seq, "ack": ack,
                 "eventId": secrets.token_hex(8), "ts": int(self.clock())}
         if reason:
             body["reason"] = reason
@@ -58,10 +57,12 @@ class CommandProcessor:
         return body
 
     def handle(self, payload):
-        """Returns the list of ACK payloads to publish, in order."""
+        """Returns the list of ACK payloads to send back, in order. Only "cmd" frames are commands."""
         try:
             msg = json.loads(payload)
         except ValueError:
+            return []
+        if not isinstance(msg, dict) or msg.get("kind") != "cmd":
             return []
         command_id = msg.get("commandId") if isinstance(msg.get("commandId"), str) else ""
         seq = msg.get("seq")
@@ -100,91 +101,114 @@ class CommandProcessor:
         return acks + [self._ack(command_id, seq, "REJECTED", "UNKNOWN_TYPE")]
 
 
-def device_request(args, path, body, content_type):
-    request = urllib.request.Request(args.api.rstrip("/") + path, data=body, method="POST", headers={
-        "Authorization": "Bearer " + args.token, "X-Device-Id": args.device_id,
-        "X-Request-Id": uuid.uuid4().hex, "X-Request-Time": str(int(time.time())), "Content-Type": content_type})
-    context = ssl.create_default_context(cafile=args.ca) if args.ca else ssl.create_default_context()
+class DoorNode:
+    """The door's command channel: one wss connection that reconnects by itself, like the firmware."""
+
+    def __init__(self, cloud, device_id, token, ca=None, state_file=None, log=print):
+        import websocket  # imported lazily so CommandProcessor tests need no WebSocket library
+        self.processor = CommandProcessor(device_id, state_file)
+        self.device_id, self.log = device_id, log
+        self.acks, self.connects, self.connected = [], 0, threading.Event()
+        url = cloud.replace("https://", "wss://").rstrip("/") + "/ws/device"
+        self.app = websocket.WebSocketApp(url, header=[f"Authorization: Bearer {token}", f"X-Device-Id: {device_id}"],
+                                          on_open=self._open, on_message=self._message, on_close=self._close)
+        # Verifies chain and hostname against the given CA (or the system store).
+        self.sslopt = {"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": ca} if ca else {"cert_reqs": ssl.CERT_REQUIRED}
+
+    def send(self, body):
+        try:
+            self.app.send(json.dumps(body))
+            return True
+        except Exception:  # noqa: BLE001 - closed socket; the ACK is simply lost, as on the device
+            return False
+
+    def status(self):
+        self.send({"v": 1, "kind": "status", "deviceId": self.device_id, "lockdown": self.processor.lockdown, "fw": "simulator"})
+
+    def _open(self, _ws):
+        self.connects += 1
+        self.connected.set()
+        self.log("[ws] connected")
+        self.status()
+
+    def _close(self, _ws, code, _reason):
+        self.connected.clear()
+        self.log(f"[ws] closed {code}")
+
+    def _message(self, _ws, text):
+        self.log(f"[cmd] {text}")
+        for ack in self.processor.handle(text):
+            self.acks.append(ack)
+            self.log(f"[ack] {ack['ack']} {ack.get('reason', '')}")
+            self.send(ack)
+        if self.processor.executions and self.processor.unlocked_until > time.time():
+            command_id = self.processor.executions[-1]
+            threading.Timer(self.processor.unlocked_until - time.time(), lambda: self.send({
+                "v": 1, "kind": "event", "deviceId": self.device_id, "eventId": secrets.token_hex(8),
+                "type": "DOOR_LOCKED", "commandId": command_id, "ts": int(time.time())})).start()
+
+    def start(self, timeout=15):
+        # suppress_origin: like the firmware (which replaces the library's default Origin), send no Origin header.
+        # Core refuses browser origins on the device socket even with a valid token.
+        threading.Thread(target=self.app.run_forever, kwargs={"sslopt": self.sslopt, "ping_interval": 15,
+                                                              "ping_timeout": 5, "reconnect": 2,
+                                                              "suppress_origin": True}, daemon=True).start()
+        return self.connected.wait(timeout)
+
+    def stop(self):
+        self.app.keep_running = False
+        self.app.close()
+
+    def acked(self, command_id, kind):
+        return any(a["commandId"] == command_id and a["ack"] == kind for a in self.acks)
+
+
+def device_request(cloud, device_id, token, path, body, content_type, ca=None, request_id=None):
+    request = urllib.request.Request(cloud.rstrip("/") + path, data=body, method="POST", headers={
+        "Authorization": "Bearer " + token, "X-Device-Id": device_id,
+        "X-Request-Id": request_id or uuid.uuid4().hex, "X-Request-Time": str(int(time.time())),
+        "Content-Type": content_type})
+    context = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
     try:
-        with urllib.request.urlopen(request, timeout=30, context=context) as response:
+        with urllib.request.urlopen(request, timeout=40, context=context) as response:
             return response.status, response.read().decode()
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode()
 
 
-def multipart(path):
+def multipart(data, filename="door.jpg", content_type="image/jpeg"):
     boundary = "sim" + secrets.token_hex(8)
-    data = Path(path).read_bytes()
-    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"door.jpg\"\r\n"
-            f"Content-Type: image/jpeg\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: {content_type}\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
     return body, "multipart/form-data; boundary=" + boundary
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--api", required=True)
-    parser.add_argument("--mqtt-host", required=True)
-    parser.add_argument("--mqtt-port", type=int, default=8883)
+    parser.add_argument("--cloud", required=True, help="https://<domain>[:port]")
     parser.add_argument("--ca", help="CA bundle; default system trust store")
     parser.add_argument("--device-id", default="door-01")
     parser.add_argument("--token-file", required=True)
-    parser.add_argument("--mqtt-password-file", required=True)
     parser.add_argument("--state-file", default=".simulator-state.json")
-    parser.add_argument("--prefix", default="smartlock")
     parser.add_argument("action", choices=["pin", "face", "listen"])
     parser.add_argument("value", nargs="?")
     args = parser.parse_args()
-    args.token = Path(args.token_file).read_text().strip()
-    mqtt_password = Path(args.mqtt_password_file).read_text().strip()
+    token = Path(args.token_file).read_text().strip()
 
-    import paho.mqtt.client as mqtt  # imported lazily so CommandProcessor tests need no broker library
-
-    processor = CommandProcessor(args.device_id, args.state_file)
-    base = f"{args.prefix}/{args.device_id}"
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=args.device_id, clean_session=True)
-    client.username_pw_set(args.device_id, mqtt_password)
-    client.tls_set(ca_certs=args.ca)  # verifies the certificate chain and hostname
-    client.will_set(base + "/status", json.dumps({"v": 1, "deviceId": args.device_id, "online": False}), qos=1, retain=True)
-    connected = threading.Event()
-
-    def status():
-        client.publish(base + "/status", json.dumps({"v": 1, "deviceId": args.device_id, "online": True,
-                                                     "lockdown": processor.lockdown, "fw": "simulator"}), qos=0, retain=True)
-
-    def on_connect(c, _userdata, _flags, reason, _props):
-        print(f"[mqtt] connected: {reason}")
-        c.subscribe(base + "/cmd", qos=1)
-        status()
-        connected.set()
-
-    def on_message(c, _userdata, message):
-        print(f"[cmd] {message.payload.decode()}")
-        for ack in processor.handle(message.payload.decode()):
-            print(f"[ack] {ack['ack']} {ack.get('reason', '')}")
-            c.publish(base + "/ack", json.dumps(ack), qos=0)
-        if processor.executions and processor.unlocked_until > time.time():
-            command_id = processor.executions[-1]
-            delay = processor.unlocked_until - time.time()
-            threading.Timer(delay, lambda: c.publish(base + "/event", json.dumps({
-                "v": 1, "deviceId": args.device_id, "eventId": secrets.token_hex(8), "type": "DOOR_LOCKED",
-                "commandId": command_id, "ts": int(time.time())}))).start()
-
-    client.on_connect, client.on_message = on_connect, on_message
-    client.connect(args.mqtt_host, args.mqtt_port, keepalive=30)
-    client.loop_start()
-    if not connected.wait(15):
-        sys.exit("MQTT connection failed")
+    door = DoorNode(args.cloud, args.device_id, token, args.ca, args.state_file)
+    if not door.start():
+        raise SystemExit("WebSocket connection failed")
     if args.action == "pin":
         body = json.dumps({"pinCode": args.value}).encode()
-        print("[https]", *device_request(args, "/api/device/pin", body, "application/json"))
+        print("[https]", *device_request(args.cloud, args.device_id, token, "/api/device/pin", body, "application/json", args.ca))
     elif args.action == "face":
-        print("[https]", *device_request(args, "/api/device/face", *multipart(args.value)))
+        body, content_type = multipart(Path(args.value).read_bytes())
+        print("[https]", *device_request(args.cloud, args.device_id, token, "/api/device/face", body, content_type, args.ca))
     try:
         time.sleep(20 if args.action != "listen" else 1e9)
     except KeyboardInterrupt:
         pass
-    client.disconnect()
-    client.loop_stop()
+    door.stop()
 
 
 if __name__ == "__main__":

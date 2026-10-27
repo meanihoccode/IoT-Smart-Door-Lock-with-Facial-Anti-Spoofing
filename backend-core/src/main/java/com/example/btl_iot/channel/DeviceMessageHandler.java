@@ -1,8 +1,7 @@
-package com.example.btl_iot.mqtt;
+package com.example.btl_iot.channel;
 
 import com.example.btl_iot.entity.SecurityAudit;
 import com.example.btl_iot.repository.SecurityAuditRepository;
-import com.example.btl_iot.security.DeviceTokens;
 import com.example.btl_iot.service.CommandService;
 import com.example.btl_iot.service.DeviceStateService;
 import java.util.Collections;
@@ -11,14 +10,13 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
-// <prefix>/<deviceId>/{ack,event,status}. The broker ACL binds each device credential to its own topics,
-// so the topic is the identity; a payload deviceId that disagrees is rejected.
+// Device → Core messages: {"v":1,"kind":"ack|event|status",...}. deviceId comes from the authenticated
+// WebSocket session; a payload deviceId that disagrees is rejected. Devices can never send "cmd".
 @Component
 public class DeviceMessageHandler {
     private static final Logger log = LoggerFactory.getLogger(DeviceMessageHandler.class);
@@ -30,21 +28,17 @@ public class DeviceMessageHandler {
     private final CommandService commands;
     private final DeviceStateService devices;
     private final SecurityAuditRepository audits;
-    private final String topicPrefix;
-    // Events are QoS 0 from PubSubClient, so redelivery is rare; this only suppresses duplicate audits.
-    private final Set<String> recentEvents = Collections.newSetFromMap(new LinkedHashMap<>() {
+    // Only suppresses duplicate audits after a resend; bounded and per Core instance.
+    private final Set<String> recentEvents = Collections.synchronizedSet(Collections.newSetFromMap(new LinkedHashMap<>() {
         @Override protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) { return size() > 1000; }
-    });
+    }));
 
-    public DeviceMessageHandler(CommandService commands, DeviceStateService devices, SecurityAuditRepository audits,
-                                @Value("${smartlock.mqtt.topic-prefix:smartlock}") String topicPrefix) {
-        this.commands = commands; this.devices = devices; this.audits = audits; this.topicPrefix = topicPrefix;
+    public DeviceMessageHandler(CommandService commands, DeviceStateService devices, SecurityAuditRepository audits) {
+        this.commands = commands; this.devices = devices; this.audits = audits;
     }
 
-    public void handle(String topic, String payload) {
-        String[] parts = topic.split("/");
-        if (parts.length != 3 || !parts[0].equals(topicPrefix) || !DeviceTokens.validId(parts[1]) || payload.length() > 2048) return;
-        String deviceId = parts[1];
+    public void handle(String deviceId, String payload) {
+        if (payload.length() > 2048) return;
         JsonNode body;
         try { body = JSON.readTree(payload); }
         catch (JacksonException e) { log.warn("event=device_message_invalid_json device={}", deviceId); return; }
@@ -53,7 +47,7 @@ public class DeviceMessageHandler {
             audits.save(new SecurityAudit(deviceId, "DEVICE_ID_MISMATCH", null));
             return;
         }
-        switch (parts[2]) {
+        switch (body.path("kind").asText("")) {
             case "ack" -> ack(deviceId, body);
             case "status" -> status(deviceId, body);
             case "event" -> event(deviceId, body);
@@ -72,10 +66,10 @@ public class DeviceMessageHandler {
     }
 
     private void status(String deviceId, JsonNode body) {
-        boolean online = body.path("online").isBoolean() && body.path("online").asBoolean();
+        // The open socket is the online signal; a status frame on it can only report lockdown/firmware.
         Boolean lockdown = body.path("lockdown").isBoolean() ? body.path("lockdown").asBoolean() : null;
         String firmware = body.path("fw").isString() ? body.path("fw").asText() : null;
-        var resync = devices.onStatus(deviceId, online, lockdown, firmware);
+        var resync = devices.onStatus(deviceId, true, lockdown, firmware);
         if (resync != null) commands.dispatch(resync.getId());
     }
 

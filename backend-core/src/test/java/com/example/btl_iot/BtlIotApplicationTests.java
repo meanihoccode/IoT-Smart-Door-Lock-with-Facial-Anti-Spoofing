@@ -5,8 +5,8 @@ import com.example.btl_iot.entity.User;
 import com.example.btl_iot.repository.*;
 import com.example.btl_iot.security.AttemptLimiter;
 import com.example.btl_iot.service.*;
-import com.example.btl_iot.mqtt.DeviceMessageHandler;
-import com.example.btl_iot.mqtt.MqttPublisher;
+import com.example.btl_iot.channel.DeviceMessageHandler;
+import com.example.btl_iot.channel.DeviceChannel;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.net.*;
@@ -26,12 +26,12 @@ import static org.mockito.Mockito.*;
 import tools.jackson.databind.ObjectMapper;
 import static org.junit.jupiter.api.Assertions.*;
 
-// Real HTTP filter chain; isolated database; MQTT simulated (publisher mocked, inbound fed to the handler).
+// Real HTTP filter chain; isolated database; device channel mocked; inbound device messages fed to the handler.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
     "spring.config.import=", "spring.datasource.url=jdbc:h2:mem:auth;DB_CLOSE_DELAY=-1",
     "spring.datasource.driver-class-name=org.h2.Driver", "spring.datasource.username=sa",
     "spring.datasource.password=", "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
-    "spring.jpa.hibernate.ddl-auto=create-drop", "smartlock.mqtt.enabled=false",
+    "spring.jpa.hibernate.ddl-auto=create-drop",
     "smartlock.pin.migrate-legacy=false",
     "smartlock.admin.username=testadmin", "smartlock.admin.password=Test-only-password-123!",
     "smartlock.device.id=door-01",
@@ -56,8 +56,9 @@ class BtlIotApplicationTests {
     @Autowired DeviceRequestRepository deviceRequests;
     @Autowired CommandService commandService;
     @Autowired DeviceMessageHandler inbound;
+    @Autowired DeviceStateService deviceState;
     @Autowired SecurityAlertRepository alerts;
-    @MockitoBean MqttPublisher mqtt;
+    @MockitoBean DeviceChannel channel;
     @MockitoBean FaceGateway faces;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -71,8 +72,8 @@ class BtlIotApplicationTests {
         var device = devices.findById("door-01").orElseThrow();
         device.setDesiredLockdown(false); device.setReportedLockdown(null); device.setOnline(false);
         device.setEnabled(true); devices.save(device);
-        org.mockito.Mockito.reset(mqtt, faces);
-        when(mqtt.publishCommand(anyString(), anyString())).thenReturn(true);
+        org.mockito.Mockito.reset(channel, faces);
+        when(channel.send(anyString(), anyString())).thenReturn(true);
     }
     class Browser {
         final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
@@ -137,7 +138,7 @@ class BtlIotApplicationTests {
     }
     String commandId(HttpResponse<String> response) throws Exception { return json.readTree(response.body()).path("commandId").asText(); }
     void ack(String commandId, String ack) {
-        inbound.handle("smartlock/door-01/ack", "{\"v\":1,\"deviceId\":\"door-01\",\"commandId\":\""+commandId+"\",\"ack\":\""+ack+"\"}");
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"ack\",\"deviceId\":\"door-01\",\"commandId\":\""+commandId+"\",\"ack\":\""+ack+"\"}");
     }
     DoorCommand.Status status(String commandId) { return commands.findById(commandId).orElseThrow().getStatus(); }
     static byte[] png() throws Exception {
@@ -225,7 +226,7 @@ class BtlIotApplicationTests {
         var user = users.findByUsername("nv001").orElseThrow();
         assertTrue(encoder.matches("001234",user.getPinHash())); assertNull(user.getPinCode());
         assertTrue(user.isEnabled()); assertNull(user.getFaceEmbedding()); assertEquals(1,admins.count());
-        verifyNoInteractions(faces, mqtt);
+        verifyNoInteractions(faces, channel);
         String listing = browser.get("/users").body();
         for (String forbidden : new String[]{"pinHash","pinCode","faceEmbedding","001234"}) assertFalse(listing.contains(forbidden));
         String entityJson = json.writeValueAsString(user);
@@ -237,7 +238,7 @@ class BtlIotApplicationTests {
         assertEquals(409,browser.multipart("/register",Map.of("username","NV001","fullName","Duplicate","pinCode","654321"),false).statusCode());
         for (String pin : new String[]{"12345","12345678901","abc123","12 3456"})
             assertEquals(400,browser.multipart("/register",Map.of("username","nv002","fullName","Second","pinCode",pin),false).statusCode());
-        assertEquals(1,users.count()); verifyNoInteractions(faces,mqtt);
+        assertEquals(1,users.count()); verifyNoInteractions(faces,channel);
     }
 
     // D02/D04: the browser kiosk has no unlock route, even when it calls the API directly with a valid CSRF token.
@@ -250,7 +251,7 @@ class BtlIotApplicationTests {
         assertEquals(401,browser.multipart("/device/face",Map.of(),true).statusCode());
         browser.login();
         assertFalse(browser.multipart("/device/face",Map.of(),true).statusCode() < 300);
-        verifyNoInteractions(faces, mqtt);
+        verifyNoInteractions(faces, channel);
         assertEquals(0,commands.count());
     }
     @Test void deviceAuthRequiresMatchingTokenAndIsRateLimited() throws Exception {
@@ -265,7 +266,7 @@ class BtlIotApplicationTests {
         for (int i=0;i<18;i++) door.pin("123456");
         door.token = DEVICE_TOKEN;
         assertEquals(429,door.pin("123456").statusCode());
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
     }
     @Test void devicePinWithoutUsernameCreatesExactlyOneCommandAndNeverClaimsDoorOpened() throws Exception {
         var profile = profiles.create("first","First","001234",null,"testadmin");
@@ -277,7 +278,7 @@ class BtlIotApplicationTests {
         var command = commands.findById(body.path("commandId").asText()).orElseThrow();
         assertEquals(DoorCommand.Type.UNLOCK,command.getType()); assertEquals(profile.id(),command.getUserId());
         var payload = ArgumentCaptor.forClass(String.class);
-        verify(mqtt,times(1)).publishCommand(eq("door-01"),payload.capture());
+        verify(channel,times(1)).send(eq("door-01"),payload.capture());
         var published = json.readTree(payload.getValue());
         assertEquals(command.getId(),published.path("commandId").asText()); assertEquals(command.getSeq(),published.path("seq").asLong());
         assertEquals(1,published.path("v").asInt()); assertTrue(published.path("expiresAt").asLong() > published.path("issuedAt").asLong());
@@ -292,7 +293,7 @@ class BtlIotApplicationTests {
         profiles.create("second","Second","001234",null,"testadmin");
         assertEquals(401,new Door().pin("001234").statusCode());
         assertTrue(audits.findAll().stream().anyMatch(a -> a.getAction().equals("PIN_AMBIGUOUS")));
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
     }
     @Test void pinFailuresAreGenericAndLimitedPerDevice() throws Exception {
         profiles.create("one","One","123456",null,"testadmin");
@@ -305,7 +306,7 @@ class BtlIotApplicationTests {
         assertEquals(429,door.pin("123456").statusCode());
         assertTrue(audits.findAll().stream().anyMatch(a -> a.getAction().equals("PIN_THROTTLED")));
         assertFalse(json.writeValueAsString(audits.findAll()).contains("999999"));
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
     }
     @Test void replayedOrStaleRequestsNeverReachAiOrCreateCommands() throws Exception {
         profiles.create("one","One","123456",null,"testadmin");
@@ -331,7 +332,7 @@ class BtlIotApplicationTests {
         when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(profile.id(),false));
         assertEquals(401,door.face().statusCode());
         assertEquals(1,users.count()); assertEquals(3,accessLogs.count());
-        verify(mqtt,times(1)).publishCommand(anyString(),anyString());
+        verify(channel,times(1)).send(anyString(),anyString());
         profiles.update(profile.id(),"One",true,revoked.version(),"testadmin");
         assertEquals(202,door.pin("123456").statusCode());
     }
@@ -384,17 +385,17 @@ class BtlIotApplicationTests {
             when(faces.identify(any())).thenReturn(match);
             assertEquals(Long.valueOf(999999L).equals(match.userId()) ? 502 : 401, door.face().statusCode());
         }
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
         var user = users.findById(profile.id()).orElseThrow(); user.setFaceEmbedding("[1]"); users.saveAndFlush(user);
         when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(profile.id(),false));
         var granted = door.face();
         assertEquals(202,granted.statusCode());
         assertEquals("FACE_VERIFIED",json.readTree(granted.body()).path("reasonCode").asText());
-        verify(mqtt,times(1)).publishCommand(eq("door-01"),anyString());
+        verify(channel,times(1)).send(eq("door-01"),anyString());
     }
-    @Test void brokerFailureNeverReportsDoorOpened() throws Exception {
+    @Test void commandChannelFailureNeverReportsDoorOpened() throws Exception {
         profiles.create("one","One","123456",null,"testadmin");
-        when(mqtt.publishCommand(anyString(),anyString())).thenReturn(false);
+        when(channel.send(anyString(),anyString())).thenReturn(false);
         var response = new Door().pin("123456");
         assertEquals(503,response.statusCode()); assertTrue(response.body().contains("COMMAND_FAILED"));
         assertEquals("COMMAND_FAILED",accessLogs.findTop5ByOrderByAccessTimeDesc().get(0).getStatus());
@@ -405,16 +406,16 @@ class BtlIotApplicationTests {
     @Test void ackLifecycleIsMonotonicAndBoundToTheDeviceTopic() throws Exception {
         profiles.create("one","One","123456",null,"testadmin");
         String id = commandId(new Door().pin("123456"));
-        inbound.handle("smartlock/door-02/ack", "{\"v\":1,\"commandId\":\""+id+"\",\"ack\":\"EXECUTED\"}");
+        inbound.handle("door-02", "{\"v\":1,\"kind\":\"ack\",\"commandId\":\""+id+"\",\"ack\":\"EXECUTED\"}");
         assertEquals(DoorCommand.Status.PUBLISHED,status(id));
         assertTrue(audits.findAll().stream().anyMatch(a -> a.getAction().equals("ACK_UNKNOWN_COMMAND")));
-        inbound.handle("smartlock/door-01/ack", "{\"v\":1,\"deviceId\":\"door-02\",\"commandId\":\""+id+"\",\"ack\":\"EXECUTED\"}");
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"ack\",\"deviceId\":\"door-02\",\"commandId\":\""+id+"\",\"ack\":\"EXECUTED\"}");
         assertEquals(DoorCommand.Status.PUBLISHED,status(id));
         ack(id,"RECEIVED"); assertEquals(DoorCommand.Status.RECEIVED,status(id));
         ack(id,"EXECUTED"); assertEquals(DoorCommand.Status.EXECUTED,status(id));
         ack(id,"RECEIVED"); ack(id,"REJECTED"); assertEquals(DoorCommand.Status.EXECUTED,status(id));
         assertEquals("COMMAND_EXECUTED",accessLogs.findTop5ByOrderByAccessTimeDesc().get(0).getStatus());
-        verify(mqtt,times(1)).publishCommand(anyString(),anyString());
+        verify(channel,times(1)).send(anyString(),anyString());
     }
     @Test void missingAckBecomesUnknownAndIsNeverResent() throws Exception {
         var past = Instant.now().minusSeconds(60);
@@ -427,7 +428,7 @@ class BtlIotApplicationTests {
         assertEquals(DoorCommand.Status.UNKNOWN,status(stale.getId()));
         assertEquals(DoorCommand.Status.FAILED,status(unpublished.getId()));
         assertEquals(DoorCommand.Status.FAILED,commandService.dispatch(unpublished.getId()).getStatus());
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
         ack(stale.getId(),"EXECUTED");
         assertEquals(DoorCommand.Status.EXECUTED,status(stale.getId()));
     }
@@ -443,24 +444,24 @@ class BtlIotApplicationTests {
         verify(faces,never()).identify(any());
         String lockId = toggled.path("commandId").asText();
         assertEquals(DoorCommand.Type.LOCKDOWN_ON,commands.findById(lockId).orElseThrow().getType());
-        inbound.handle("smartlock/door-01/status","{\"v\":1,\"online\":true,\"lockdown\":false,\"fw\":\"test\"}");
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"status\",\"online\":true,\"lockdown\":false,\"fw\":\"test\"}");
         // Device came online disagreeing: a fresh lockdown command is NOT stacked while the first is in flight.
-        verify(mqtt,times(1)).publishCommand(eq("door-01"),anyString());
+        verify(channel,times(1)).send(eq("door-01"),anyString());
         ack(lockId,"EXECUTED");
         var status = json.readTree(browser.get("/lockdown/status").body());
         assertTrue(status.path("lockdownApplied").asBoolean()); assertEquals("ONLINE",status.path("connection").asText());
-        inbound.handle("smartlock/door-01/status","{\"v\":1,\"deviceId\":\"door-01\",\"online\":false}");
+        deviceState.onStatus("door-01", false, null, null); // what DeviceSocketHandler does when the socket closes
         assertFalse(json.readTree(browser.get("/lockdown/status").body()).path("lockdownApplied").asBoolean());
         assertEquals("OFFLINE",json.readTree(new Browser().get("/door-status").body()).path("connection").asText());
     }
     @Test void reconnectingDeviceWithStaleLockdownGetsResynced() throws Exception {
         var device = devices.findById("door-01").orElseThrow(); device.setDesiredLockdown(true); devices.save(device);
-        inbound.handle("smartlock/door-01/status","{\"v\":1,\"online\":true,\"lockdown\":false}");
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"status\",\"online\":true,\"lockdown\":false}");
         var payload = ArgumentCaptor.forClass(String.class);
-        verify(mqtt).publishCommand(eq("door-01"),payload.capture());
+        verify(channel).send(eq("door-01"),payload.capture());
         assertEquals("LOCKDOWN_ON",json.readTree(payload.getValue()).path("type").asText());
-        inbound.handle("smartlock/door-01/status","{\"v\":1,\"online\":true,\"lockdown\":true}");
-        verify(mqtt,times(1)).publishCommand(anyString(),anyString());
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"status\",\"online\":true,\"lockdown\":true}");
+        verify(channel,times(1)).send(anyString(),anyString());
     }
     @Test void remoteOpenRequiresAdminSessionAndIsAudited() throws Exception {
         var browser = new Browser();
@@ -499,7 +500,7 @@ class BtlIotApplicationTests {
         var browser = new Browser(); browser.login();
         when(faces.extract(any())).thenThrow(new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY,"AI unavailable"));
         assertEquals(502,browser.multipart("/register",Map.of("username","one","fullName","One","pinCode","123456"),true).statusCode());
-        assertEquals(0,users.count()); verifyNoInteractions(mqtt);
+        assertEquals(0,users.count()); verifyNoInteractions(channel);
     }
     @Test void kioskHandoffRevokesAdminAndRequiresCsrf() throws Exception {
         var browser = new Browser(); browser.login();
@@ -544,7 +545,7 @@ class BtlIotApplicationTests {
         assertEquals("MODEL_UNAVAILABLE",body.path("reasonCode").asText());
         assertEquals("request-http-test",body.path("aiRequestId").asText());
         assertEquals("MODEL_UNAVAILABLE",accessLogs.findTop5ByOrderByAccessTimeDesc().get(0).getStatus());
-        verifyNoInteractions(mqtt);
+        verifyNoInteractions(channel);
     }
 
     @Test void enrollmentErrorAdvicePreservesAiReasonWithoutCreatingProfile() throws Exception {
@@ -555,7 +556,7 @@ class BtlIotApplicationTests {
         var body = json.readTree(response.body());
         assertEquals("MULTIPLE_FACES",body.path("reasonCode").asText());
         assertEquals("request-enroll-test",body.path("requestId").asText());
-        assertEquals(0,users.count()); verifyNoInteractions(mqtt);
+        assertEquals(0,users.count()); verifyNoInteractions(channel);
     }
 
 }

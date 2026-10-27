@@ -5,7 +5,12 @@ SMARTLOCK_DB_PORT=3306
 SMARTLOCK_DB_NAME=btl_iot
 SMARTLOCK_DB_USER=root
 SMARTLOCK_DB_PASSWORD=
-SMARTLOCK_MQTT_BROKER_URL=tcp://localhost:1883
+SMARTLOCK_AI_URL=http://localhost:8000/api/
+
+# Door node: only the SHA-256 of the device token (deploy/scripts/new-device-credentials.sh).
+# The device uses the token for REST and for the command WebSocket /ws/device.
+SMARTLOCK_DEVICE_ID=door-01
+SMARTLOCK_DEVICE_TOKEN_SHA256=
 
 # First start only: creates an admin if admin_accounts is empty.
 # Choose your own username and password (12+ characters, at most 72 UTF-8 bytes).

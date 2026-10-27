@@ -28,7 +28,8 @@ if ($ConfigPath) {
 $sketchPath = Join-Path $projectRoot ('.runtime\sketch\' + [guid]::NewGuid().ToString('N') + '\main')
 $buildPath = Join-Path $projectRoot '.runtime\esp32-build'
 New-Item -ItemType Directory -Force $sketchPath | Out-Null
-# Canonical firmware source is the Arduino IDE sketch folder esp32/main (main.ino + bundled PubSubClient).
+# Canonical firmware source is the Arduino IDE sketch folder esp32/main. Required libraries (Library Manager):
+# Keypad, ESP32Servo, WebSockets (Markus Sattler) 2.7.2.
 Get-ChildItem -LiteralPath (Join-Path $projectRoot 'esp32\main') -File |
     Where-Object { $_.Extension -in '.ino', '.cpp', '.h' } |
     ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $sketchPath }

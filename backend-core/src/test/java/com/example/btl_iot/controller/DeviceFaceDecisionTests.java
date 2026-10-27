@@ -281,7 +281,7 @@ class DeviceFaceDecisionTests {
     }
 
     @Test
-    void recognizedFaceButBrokerFailureIsNotSuccess() {
+    void recognizedFaceButCommandChannelFailureIsNotSuccess() {
         respondWith(successResponse("7"));
         User user = new User(); user.setId(7L); user.setFaceEmbedding("[1]");
         when(userRepository.findLockedById(7L)).thenReturn(Optional.of(user));
