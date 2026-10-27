@@ -16,6 +16,7 @@ Ngày tạo: 25/10/2026. Ghi nguồn và trạng thái để phiên sau không h
 | D08 | Board/wiring | Chưa xác minh thực tế | Firmware ghi ESP32-S3 N16R8/OV2640; cần FQBN, flash/PSRAM, loại khóa và cực tính relay thực tế. Không đổi GPIO theo suy đoán. |
 | D09 | Recovery offline | Ngoài phạm vi mặc định | Bỏ master PIN mặc định. Cơ chế recovery mới cần yêu cầu riêng và xác minh thoát hiểm/wiring. |
 | D10 | Schema command | Hướng đã chốt 26/10/2026; chi tiết là đề xuất | **Một đường thực thi: lệnh chỉ đi qua WebSocket thiết bị.** Firmware chỉ mở khi nhận command JSON hợp lệ (`kind:"cmd"`) qua WebSocket và gửi ACK `RECEIVED`/`EXECUTED`/`REJECTED`; phản hồi REST chỉ chứa quyết định + `commandId`. Nguồn: người dùng. Trường, TTL, `seq` chống phát lại qua reboot và transition không đổi so với v1; transport theo [DEVICE_CONTRACT](DEVICE_CONTRACT.md) v2. Lịch sử: chốt lần đầu là “MQTT-only”, đổi transport theo D05 cùng ngày. |
+| D11 | Camera trực tiếp trên kiosk | Đã chốt bởi người dùng 28/10/2026 | Trang `/kiosk` hiển thị camera ESP32 trực tiếp **công khai** (`GET /api/kiosk/live`, không cần đăng nhập). Người dùng chọn phương án này thay vì kiosk ghép nối bằng cookie riêng, sau khi được nêu rủi ro: ai có URL đều xem được hình trước cửa và tăng băng thông. Khung hình chỉ để hiển thị, không gửi AI, không tạo command (D02 giữ nguyên). Ảnh lần quét PIR vẫn chỉ admin xem. |
 
 ## Ghi chú D05
 

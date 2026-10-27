@@ -59,7 +59,7 @@ export default function DoorPanel() {
             </div>
             {notice && <p className="text-sm text-gray-700 mb-3" aria-live="polite">{notice}</p>}
             {error && <p role="alert" className="text-sm text-red-700 mb-3">{error}</p>}
-            <LiveCamera />
+            <div className="sm:w-96"><LiveCamera /></div>
             <h4 className="text-sm font-medium text-gray-900 mb-2">Lần quét khuôn mặt gần nhất (camera cửa)</h4>
             {scan ? (
                 <div className="flex flex-col sm:flex-row gap-4 mb-5">

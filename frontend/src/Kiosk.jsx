@@ -2,10 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ShieldCheck, ShieldAlert, ScanFace, KeyRound, Loader2 } from 'lucide-react';
 import api from './api';
+import LiveCamera from './LiveCamera';
 import { STATUS_POLL_MS, TONE_CLASSES, commandLabel, commandTypeLabel, connectionLabel, methodLabel } from './door-status';
 
 // Public status screen only. Unlocking happens at the door: the ESP32 camera or keypad sends to the cloud
 // with device credentials. The browser has no unlock route and holds no device secret (D02, D04).
+// The live camera view is display-only and public by the user's choice (D11).
 const Kiosk = () => {
     const [door, setDoor] = useState(null);
     const [error, setError] = useState('');
@@ -65,6 +67,10 @@ const Kiosk = () => {
                         <h1 className="text-2xl font-bold text-gray-900 tracking-tight mb-2">Mở khóa tại cửa</h1>
                         <p className="text-gray-500 text-sm">Nhìn vào camera trên thiết bị (hoặc bấm phím D), hoặc nhập PIN trên bàn phím rồi bấm #.</p>
                     </div>
+
+                    <section className="w-full bg-white rounded-2xl border border-gray-100 p-4 mb-6">
+                        <LiveCamera endpoint="/kiosk/live" title="Camera cửa (trực tiếp)" />
+                    </section>
 
                     <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
                         <div className="bg-white rounded-2xl border border-gray-100 p-5 flex items-start gap-3">

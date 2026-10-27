@@ -70,8 +70,9 @@ public class DoorController {
                 .contentType(MediaType.parseMediaType(scan.contentType())).body(scan.image());
     }
 
-    // Live door-camera view (admin only). 204 while the device has not sent a fresh frame yet.
-    @GetMapping("/admin/door/live")
+    // Live door-camera view. 204 while the device has not sent a fresh frame yet.
+    // Also public on the kiosk by the user's choice (D11): anyone with the kiosk URL sees the door camera.
+    @GetMapping({"/admin/door/live", "/kiosk/live"})
     public ResponseEntity<byte[]> live() {
         var frame = preview.latest(devices.defaultDeviceId());
         if (frame == null) return ResponseEntity.noContent().header("Cache-Control", "no-store").build();

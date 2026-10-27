@@ -157,6 +157,12 @@ class DeviceWebSocketTests {
         var anonymous = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/admin/door/live")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(401, anonymous.statusCode());
+        // D11: the kiosk view is public and returns the same display-only frame.
+        var kiosk = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/api/kiosk/live")).GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, kiosk.statusCode());
+        assertArrayEquals(jpeg, kiosk.body());
+        assertEquals(0, commands.count());
         door.socket.sendClose(WebSocket.NORMAL_CLOSURE, "bye").join();
         assertTrue(eventually(() -> !channel.isConnected("door-01")));
         assertNull(preview.latest("door-01"));

@@ -61,7 +61,7 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/kiosk").permitAll()
-                .requestMatchers(HttpMethod.GET, "/api/door-status").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/door-status", "/api/kiosk/live").permitAll()
                 .requestMatchers(
                     "/api/auth/**",
                     "/api/admin/**",
