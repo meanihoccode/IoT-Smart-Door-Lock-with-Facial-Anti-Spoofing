@@ -90,6 +90,8 @@ const unsigned long AWAIT_COMMAND_MS       = 15000; // Chờ command sau khi clo
 const long          CLOCK_SKEW_S           = 5;     // Sai lệch đồng hồ chấp nhận khi kiểm TTL
 const uint32_t      FACE_HTTP_TIMEOUT_MS   = 15000;
 const uint32_t      PIN_HTTP_TIMEOUT_MS    = 15000; // Cloud quét BCrypt mọi hồ sơ (D04)
+const unsigned long API_KEEPALIVE_MS       = 60000;  // Giữ kết nối HTTPS ấm: GET /api/device/state mỗi phút khi rảnh
+const unsigned long API_MAX_IDLE_MS        = 120000; // Kết nối im lâu hơn thì bỏ, bắt tay lại (tránh socket chết do NAT)
 
 // ============================================================================
 // 2. ĐỊNH NGHĨA CHÂN CAMERA OV2640 (CỐ ĐỊNH TRÊN ESP32-S3 N16R8 CAM)
@@ -621,25 +623,77 @@ String apiUrl(const String& path) {
   return String("https://") + CLOUD_HOST + (CLOUD_PORT == 443 ? String("") : ":" + String(CLOUD_PORT)) + path;
 }
 
+// Một kết nối HTTPS giữ sống (keep-alive) cho mọi request REST: bỏ bắt tay TCP + TLS ở mỗi lần quét.
+// Vẫn kiểm chứng CA/hostname như cũ; chỉ dùng lại kết nối đã được kiểm chứng tới đúng CLOUD_HOST.
+WiFiClientSecure apiTls;
+HTTPClient apiHttp;
+bool apiReady = false;
+unsigned long lastApiUse = 0;
+
+// Lỗi xảy ra trước khi có phản hồi trên kết nối dùng lại = socket đã chết; gửi lại an toàn.
+bool staleConnectionError(int code) {
+  return code == HTTPC_ERROR_SEND_HEADER_FAILED || code == HTTPC_ERROR_SEND_PAYLOAD_FAILED
+      || code == HTTPC_ERROR_NOT_CONNECTED || code == HTTPC_ERROR_CONNECTION_LOST;
+}
+
+int apiSend(const String& path, const String& contentType, uint8_t* body, size_t length, uint32_t timeoutMs,
+            const String& requestId, String& response) {
+  response = "";
+  if (!apiHttp.begin(apiTls, apiUrl(path))) return -1;
+  apiHttp.setConnectTimeout(5000);
+  apiHttp.setTimeout(timeoutMs);
+  apiHttp.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
+  apiHttp.addHeader("X-Device-Id", DEVICE_ID);
+  if (requestId.length() > 0) {
+    apiHttp.addHeader("X-Request-Id", requestId);
+    apiHttp.addHeader("X-Request-Time", String((uint32_t)time(nullptr)));
+  }
+  int code;
+  if (body) {
+    apiHttp.addHeader("Content-Type", contentType);
+    code = apiHttp.POST(body, length);
+  } else {
+    code = apiHttp.GET();
+  }
+  if (code > 0) response = apiHttp.getString(); // Đọc hết phản hồi thì kết nối mới dùng lại được
+  apiHttp.end();                                 // setReuse(true): giữ socket nếu server cho keep-alive
+  return code;
+}
+
+// body == NULL: GET. requestId rỗng: không gửi X-Request-Id (chỉ dùng cho GET /api/device/state).
 int deviceRequest(const String& path, const String& contentType, uint8_t* body, size_t length,
-                  uint32_t timeoutMs, String& response) {
+                  uint32_t timeoutMs, String& response, bool singleUse = true) {
   response = "";
   if (WiFi.status() != WL_CONNECTED || !caConfigured || !timeSynced() || strlen(DEVICE_TOKEN) == 0) return -1;
-  WiFiClientSecure net;
-  net.setCACert(ROOT_CA_PEM); // Kiểm chứng CA và hostname; không dùng setInsecure()
-  HTTPClient http;
-  if (!http.begin(net, apiUrl(path))) return -1;
-  http.setConnectTimeout(5000);
-  http.setTimeout(timeoutMs);
-  http.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
-  http.addHeader("X-Device-Id", DEVICE_ID);
-  http.addHeader("X-Request-Id", randomId());
-  http.addHeader("X-Request-Time", String((uint32_t)time(nullptr)));
-  http.addHeader("Content-Type", contentType);
-  int code = http.POST(body, length);
-  if (code > 0) response = http.getString();
-  http.end();
+  if (!apiReady) {
+    apiTls.setCACert(ROOT_CA_PEM); // Kiểm chứng CA và hostname; không dùng setInsecure()
+    apiHttp.setReuse(true);
+    apiReady = true;
+  }
+  if (apiTls.connected() && millis() - lastApiUse > API_MAX_IDLE_MS) apiTls.stop();
+  bool reused = apiTls.connected();
+  // Lần gửi lại dùng CÙNG X-Request-Id: nếu lần đầu đã tới server thì Core trả 409, không mở cửa hai lần.
+  String requestId = singleUse ? randomId() : String("");
+  unsigned long started = millis();
+  int code = apiSend(path, contentType, body, length, timeoutMs, requestId, response);
+  if (reused && staleConnectionError(code)) {
+    Serial.println("[HTTPS] Kết nối giữ sống đã đóng, kết nối lại...");
+    apiTls.stop();
+    reused = false;
+    code = apiSend(path, contentType, body, length, timeoutMs, requestId, response);
+  }
+  if (code > 0) lastApiUse = millis(); else apiTls.stop();
+  Serial.printf("[HTTPS] %s %d sau %lu ms (%s)\n", path.c_str(), code, millis() - started,
+                reused ? "dùng lại kết nối" : "kết nối mới");
   return code;
+}
+
+// Giữ kết nối HTTPS ấm khi rảnh để lần quét kế tiếp không phải bắt tay TLS lại.
+void keepApiWarm() {
+  if (millis() - lastApiUse < API_KEEPALIVE_MS) return;
+  String response;
+  deviceRequest("/api/device/state", "", NULL, 0, 5000, response, false);
+  if (lastApiUse == 0 || millis() - lastApiUse >= API_KEEPALIVE_MS) lastApiUse = millis(); // Lỗi: đợi chu kỳ sau
 }
 
 Decision decisionFrom(int code, const String& response) {
@@ -710,8 +764,10 @@ int postPhoto(const String& path, const String& fields, uint32_t timeoutMs, Stri
 
 Decision captureAndVerifyFace() {
   String response;
+  unsigned long started = millis();
   int code = postPhoto("/api/device/face", "", FACE_HTTP_TIMEOUT_MS, response);
   Serial.printf("[HTTPS] Kết quả khuôn mặt: %d %s\n", code, response.c_str());
+  Serial.printf("[THỜI GIAN] Chụp + gửi + AI cloud: %lu ms\n", millis() - started);
   return decisionFrom(code, response);
 }
 
@@ -936,6 +992,7 @@ void loop() {
     if (wsStarted) {
       ws.loop(); // nhận lệnh, gửi ping, tự kết nối lại
       if (wsConnected && millis() - lastHeartbeat >= HEARTBEAT_MS) publishStatus();
+      if (wsConnected && !isDoorUnlocked && !awaitCommandUntil) keepApiWarm();
       if (wsConnected && (long)(previewUntil - millis()) > 0 && millis() - lastPreviewFrame >= PREVIEW_INTERVAL_MS) {
         lastPreviewFrame = millis();
         sendPreviewFrame();
