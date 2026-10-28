@@ -1,6 +1,6 @@
 # Sơ đồ kiến trúc và luồng hoạt động
 
-Ngày lập: 28/10/2026 · Áp dụng cho nhánh `level3-cloud` (commit `c228d5cd`). Sơ đồ viết bằng Mermaid; GitHub hiển thị trực tiếp, VS Code cần extension xem trước Mermaid. Chi tiết giao thức xem [DEVICE_CONTRACT](DEVICE_CONTRACT.md); lịch sử thay đổi xem [CHANGES_SINCE_575489b9](CHANGES_SINCE_575489b9.md).
+Ngày lập: 28/10/2026 · Cập nhật: 28/10/2026 · Áp dụng cho nhánh `level3-cloud` (commit `af5b7fa6`: kiosk khôi phục giao diện quét mặt, tên đã che theo D12). Sơ đồ viết bằng Mermaid; GitHub hiển thị trực tiếp, VS Code cần extension xem trước Mermaid. Chi tiết giao thức xem [DEVICE_CONTRACT](DEVICE_CONTRACT.md); quyết định xem [DECISIONS](DECISIONS.md); lịch sử thay đổi xem [CHANGES_SINCE_575489b9](CHANGES_SINCE_575489b9.md).
 
 Mục lục:
 
@@ -18,6 +18,8 @@ Mục lục:
 12. [Vòng lặp firmware: PIR, cảnh báo kẻ lạ](#12-vòng-lặp-firmware-pir-cảnh-báo-kẻ-lạ)
 13. [Kết nối thiết bị: Wi-Fi, NTP, WebSocket](#13-kết-nối-thiết-bị-wi-fi-ntp-websocket)
 14. [Đăng ký khuôn mặt](#14-đăng-ký-khuôn-mặt)
+15. [Kiosk hiển thị kết quả quét](#15-kiosk-hiển-thị-kết-quả-quét)
+16. [Trạng thái màn hình kiosk](#16-trạng-thái-màn-hình-kiosk)
 
 ---
 
@@ -52,7 +54,7 @@ flowchart LR
 
     subgraph APP["Ứng dụng (Application)"]
         ADMIN["Trang admin<br/>(đăng nhập)"]
-        KIOSK["Trang kiosk<br/>(công khai, chỉ xem)"]
+        KIOSK["Trang kiosk<br/>(công khai, chỉ xem,<br/>camera + kết quả, tên đã che)"]
     end
 
     FW -- "REST HTTPS<br/>ảnh, PIN, cảnh báo" --> WEB
@@ -66,6 +68,7 @@ flowchart LR
 - Thiết bị chỉ nói chuyện với **một tên miền** (`smartlock-hung.duckdns.org`, cổng 443), xác thực bằng token Bearer.
 - DB và AI **không** mở ra internet; chỉ Core gọi được.
 - Trình duyệt không có đường mở cửa bằng ảnh/PIN; chỉ admin đã đăng nhập mở từ xa.
+- Kiosk công khai (D11, D12): thấy camera trực tiếp và kết quả quét với **tên đã che** (`V*** Q*** Hưng`); họ tên đầy đủ và ảnh quét chỉ có ở trang admin.
 
 ## 2. Trước và sau nâng cấp
 
@@ -153,7 +156,8 @@ flowchart TB
         CH["DeviceChannel<br/>phiên WebSocket mỗi thiết bị"]
         MH["DeviceMessageHandler<br/>ack · event · status"]
         LP["LivePreview<br/>khung hình xem trước (RAM)"]
-        LC["LastCaptureStore<br/>ảnh quét gần nhất (RAM)"]
+        LC["LastCaptureStore<br/>ảnh quét gần nhất + họ tên (RAM, admin)"]
+        KF["KioskFeed<br/>chuyển động PIR, lượt xác thực gần nhất,<br/>tên đã che (RAM, kiosk)"]
     end
 
     DAF --> DC
@@ -164,17 +168,20 @@ flowchart TB
     DC --> ACC
     DC --> FG
     DC --> LC
+    DC --> KF
     ACC --> CMD
     DOOR --> ACC
     DOOR --> CMD
     DOOR --> DS
     DOOR --> LP
     DOOR --> LC
+    DOOR --> KF
     WS --> CH
     WS --> MH
     WS --> LP
     MH --> CMD
     MH --> DS
+    MH --> KF
     CMD --> CH
     LP --> CH
 ```
@@ -195,6 +202,7 @@ sequenceDiagram
     U->>E: Đứng trước cửa (PIR = HIGH)
     E->>E: Bật LED, chụp ảnh (xả khung cũ)
     E-)C: WS event PIR_MOTION
+    C->>C: KioskFeed ghi thời điểm chuyển động → kiosk hiện "ĐANG PHÂN TÍCH AI..."
     E->>C: POST /api/device/face<br/>Bearer token, X-Request-Id, X-Request-Time, ảnh JPEG
     C->>C: DeviceAuthFilter (token) · RequestGuard (ID 1 lần, ±120 s)<br/>giới hạn 30 lần/5 phút · kiểm tra lockdown
     C->>A: POST /api/verify-face (mạng nội bộ)
@@ -216,8 +224,11 @@ sequenceDiagram
         C->>D: Command EXECUTED, cập nhật access_logs
         Note over E: Hết 7 s → khóa lại → event DOOR_LOCKED
     end
-    C->>C: Lưu ảnh + kết quả vào LastCaptureStore (admin xem)
+    C->>C: LastCaptureStore: ảnh + kết quả + họ tên (admin xem)
+    C->>C: KioskFeed: lượt FACE + reasonCode + tên đã che (kiosk xem, không ảnh)
 ```
+
+Kiosk chỉ chào "Xin chào V\*\*\* Q\*\*\* Hưng… mở khóa" khi lệnh của lượt đó đã có ACK `EXECUTED` (xem [mục 15](#15-kiosk-hiển-thị-kết-quả-quét)).
 
 ## 6. Luồng mở cửa bằng PIN keypad
 
@@ -246,7 +257,10 @@ sequenceDiagram
         C-->>E: 401 (hoặc 429 khi vượt giới hạn)
         E->>E: Đếm sai, đủ 3 lần → cảnh báo WRONG_PIN_3_TIMES kèm ảnh
     end
+    C->>C: KioskFeed: lượt PIN + reasonCode (+ tên đã che nếu đúng)
 ```
+
+Lần thử bị chặn vì lockdown hoặc vượt giới hạn (429) không được ghi vào KioskFeed; kiosk đã có banner lockdown riêng.
 
 ## 7. Luồng admin mở cửa từ xa
 
@@ -273,6 +287,8 @@ sequenceDiagram
     end
     Note over B: Không tự gửi lại: phản hồi bị mất vẫn có thể đã mở cửa
 ```
+
+Trên kiosk, lệnh `REMOTE_ADMIN` đã `EXECUTED` trong 8 giây gần nhất hiện "Quản trị viên đã mở khóa từ xa".
 
 ## 8. Vòng đời lệnh (command)
 
@@ -454,3 +470,98 @@ sequenceDiagram
     C->>D: Lưu user (PIN băm BCrypt, embedding)
     C-->>B: 201 Đăng ký thành công
 ```
+
+## 15. Kiosk hiển thị kết quả quét
+
+Trang kiosk công khai, không đăng nhập. Nó chỉ **đọc** trạng thái; mọi quyết định đã do Core đưa ra từ ảnh/PIN của thiết bị. Tên được che ngay trên Core (`KioskFeed.mask`), API công khai không bao giờ chứa họ tên đầy đủ, ảnh hay `commandId` (D12).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant K as Trình duyệt kiosk
+    participant C as Core – DoorController
+    participant F as KioskFeed (RAM)
+    participant M as CommandService
+    participant E as ESP32
+
+    par Camera trực tiếp
+        loop Mỗi 350 ms
+            K->>C: GET /api/kiosk/live
+            C-->>K: 200 image/jpeg hoặc 204
+        end
+    and Trạng thái
+        loop Mỗi 1 s
+            K->>C: GET /api/door-status
+            C->>F: lastMotion, lastAttempt
+            C->>M: lệnh gần nhất
+            C-->>K: serverTime, connection, lockdown,<br/>motionAt, lastAttempt {method, reasonCode, at,<br/>person = "V*** Q*** Hưng", commandStatus},<br/>lastCommand {type, method, status, thời gian}
+            K->>K: kioskView(): tính trạng thái theo đồng hồ server
+        end
+    end
+
+    Note over E,C: Ví dụ một lượt quét mặt thành công
+    E-)C: event PIR_MOTION
+    C->>F: motion()
+    K->>C: GET /api/door-status
+    C-->>K: motionAt mới → "ĐANG PHÂN TÍCH AI..."
+    E->>C: POST /api/device/face → FACE_VERIFIED
+    C->>F: attempt(FACE, FACE_VERIFIED, "Vương Quốc Hưng" → che, commandId)
+    C-)E: WS cmd UNLOCK
+    K->>C: GET /api/door-status
+    C-->>K: commandStatus PUBLISHED → "Đã nhận diện V*** Q*** Hưng. Đang mở khóa…"
+    E-)C: ACK EXECUTED
+    K->>C: GET /api/door-status
+    C-->>K: commandStatus EXECUTED → "Xin chào V*** Q*** Hưng! … mở khóa, mời vào."
+```
+
+Câu báo khi bị từ chối (file `frontend/src/kiosk-feedback.js`):
+
+| `reasonCode` | Kiosk hiển thị |
+| --- | --- |
+| `SPOOF_DETECTED` | Cảnh báo: phát hiện khuôn mặt giả mạo (ảnh hoặc màn hình điện thoại). Từ chối truy cập! (nền đỏ đậm, biểu tượng khiên) |
+| `NOT_RECOGNIZED` | Người lạ: khuôn mặt chưa được đăng ký. Từ chối truy cập. |
+| `PIN_REJECTED` | Mã PIN không đúng. Vui lòng thử lại. |
+| `NO_FACE`, `MULTIPLE_FACES`, `LOW_QUALITY`, `LIVENESS_UNCERTAIN`… | Câu hướng dẫn riêng cho từng lỗi (như nhánh `main`). |
+
+Model chống giả mạo chỉ trả **thật / không thật**, không phân biệt điện thoại hay ảnh in, nên câu báo ghi chung "ảnh hoặc màn hình điện thoại".
+
+## 16. Trạng thái màn hình kiosk
+
+Hàm `kioskView()` tính trạng thái từ `/api/door-status`; thời gian so theo `serverTime` nên không phụ thuộc đồng hồ máy kiosk.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> IDLE
+    IDLE --> SCANNING: (1)
+    SCANNING --> SUCCESS: (2)
+    SCANNING --> FAILED: (3)
+    IDLE --> SUCCESS: (4)
+    IDLE --> FAILED: (5)
+    SCANNING --> IDLE: (6)
+    SUCCESS --> IDLE: (7)
+    FAILED --> IDLE: (8)
+    IDLE --> LOCKED: (9)
+    LOCKED --> IDLE: (10)
+```
+
+| Trạng thái | Kiosk hiển thị |
+| --- | --- |
+| `IDLE` | "Vui lòng đứng trước camera, hệ thống sẽ tự quét khuôn mặt." + khung ngắm. Thiết bị offline thì báo mất kết nối. |
+| `SCANNING` | Ảnh mờ xám + "ĐANG PHÂN TÍCH AI..." · hoặc "Đã nhận diện V\*\*\* Q\*\*\* Hưng. Đang mở khóa…" khi chờ ACK. |
+| `SUCCESS` | Nền xanh, dấu tích: "Xin chào V\*\*\* Q\*\*\* Hưng! Đã xác thực bằng khuôn mặt/mã PIN và mở khóa, mời vào." · hoặc "Quản trị viên đã mở khóa từ xa." |
+| `FAILED` | Câu báo theo `reasonCode` (bảng ở mục 15). Giả mạo: nền đỏ đậm + khiên. |
+| `LOCKED` | Banner đỏ nhấp nháy "CỬA ĐANG BỊ VÔ HIỆU HÓA KHẨN CẤP…". |
+
+| # | Điều kiện chuyển |
+| --- | --- |
+| 1 | Có `motionAt` dưới 12 s và mới hơn lượt gần nhất · hoặc lượt được chấp thuận, lệnh chưa có ACK thực thi (chờ tối đa 20 s). |
+| 2 | Lượt được chấp thuận và `commandStatus = EXECUTED`. |
+| 3 | Lượt bị từ chối · hoặc lệnh `REJECTED` / `FAILED` / `UNKNOWN` · hoặc `COMMAND_FAILED`. |
+| 4 | Lệnh `REMOTE_ADMIN` đã `EXECUTED` trong 8 s gần nhất. |
+| 5 | Lượt PIN sai trên keypad (không qua bước phân tích AI). |
+| 6 | Hết 12 s không có kết quả sau chuyển động, hoặc hết 20 s chờ ACK. |
+| 7 | Sau khoảng 12 s kể từ lượt xác thực. |
+| 8 | Sau khoảng 8 s kể từ lượt bị từ chối. |
+| 9 | `lockdown = true` (ưu tiên cao nhất, từ bất kỳ trạng thái nào). |
+| 10 | `lockdown = false`. |
