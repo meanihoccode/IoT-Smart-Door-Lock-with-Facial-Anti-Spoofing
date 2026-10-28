@@ -331,8 +331,10 @@ class BtlIotApplicationTests {
         assertEquals(401,browser.get("/admin/door/last-capture").statusCode());
         assertEquals(401,browser.get("/admin/door/last-capture/image").statusCode());
         var kiosk = json.readTree(browser.get("/door-status").body());
-        assertEquals("NO_FACE",kiosk.path("lastScan").path("reasonCode").asText());
-        assertFalse(kiosk.path("lastScan").has("imageUrl"));
+        assertEquals("NO_FACE",kiosk.path("lastAttempt").path("reasonCode").asText());
+        assertEquals("FACE",kiosk.path("lastAttempt").path("method").asText());
+        assertFalse(kiosk.path("lastAttempt").has("person"));
+        assertFalse(kiosk.toString().contains("imageUrl"));
         browser.login();
         var meta = json.readTree(browser.get("/admin/door/last-capture").body());
         assertEquals("NO_FACE",meta.get("reasonCode").asText());
@@ -407,6 +409,36 @@ class BtlIotApplicationTests {
         assertEquals(202,granted.statusCode());
         assertEquals("FACE_VERIFIED",json.readTree(granted.body()).path("reasonCode").asText());
         verify(channel,times(1)).send(eq("door-01"),anyString());
+    }
+    @Test void kioskShowsMaskedNameMotionAndOutcomeOnlyAfterDeviceAck() throws Exception {
+        var profile = profiles.create("hung","Vương Quốc Hưng","123456","[1]","testadmin");
+        var browser = new Browser(); var door = new Door();
+        inbound.handle("door-01", "{\"v\":1,\"kind\":\"event\",\"type\":\"PIR_MOTION\",\"eventId\":\"e1\"}");
+        assertTrue(json.readTree(browser.get("/door-status").body()).has("motionAt"));
+        when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(profile.id(),false));
+        String commandId = json.readTree(door.face().body()).path("commandId").asText();
+        var kiosk = json.readTree(browser.get("/door-status").body());
+        var attempt = kiosk.path("lastAttempt");
+        assertEquals("FACE_VERIFIED",attempt.path("reasonCode").asText());
+        assertEquals("V*** Q*** Hưng",attempt.path("person").asText());
+        assertEquals("PUBLISHED",attempt.path("commandStatus").asText());
+        assertFalse(kiosk.toString().contains("Vương Quốc Hưng"));
+        assertFalse(kiosk.toString().contains(commandId));
+        ack(commandId,"EXECUTED");
+        assertEquals("EXECUTED",json.readTree(browser.get("/door-status").body()).path("lastAttempt").path("commandStatus").asText());
+        browser.login();
+        assertEquals("Vương Quốc Hưng",json.readTree(browser.get("/admin/door/last-capture").body()).path("person").asText());
+        // A spoof attempt replaces the kiosk view with a denial and no name.
+        when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(profile.id(),true));
+        door.face();
+        attempt = json.readTree(new Browser().get("/door-status").body()).path("lastAttempt");
+        assertEquals("SPOOF_DETECTED",attempt.path("reasonCode").asText());
+        assertFalse(attempt.has("person")); assertFalse(attempt.has("commandStatus"));
+    }
+    @Test void kioskNameMaskKeepsOnlyInitialsAndLastWord() {
+        assertEquals("V*** Q*** Hưng",com.example.btl_iot.service.KioskFeed.mask("  Vương   Quốc Hưng "));
+        assertEquals("H***",com.example.btl_iot.service.KioskFeed.mask("Hưng"));
+        assertNull(com.example.btl_iot.service.KioskFeed.mask(" "));
     }
     @Test void commandChannelFailureNeverReportsDoorOpened() throws Exception {
         profiles.create("one","One","123456",null,"testadmin");

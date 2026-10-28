@@ -14,18 +14,19 @@ import org.springframework.web.multipart.MultipartFile;
 @Component
 public class LastCaptureStore {
     public record Capture(long seq, byte[] image, String contentType, Instant capturedAt,
-                          String reasonCode, String message, String commandId) {}
+                          String reasonCode, String message, String commandId, String person) {}
     private final Map<String, Capture> captures = new ConcurrentHashMap<>();
     private final AtomicLong seq = new AtomicLong();
     private final Clock clock;
     public LastCaptureStore(Clock clock) { this.clock = clock; }
 
-    public void save(String deviceId, MultipartFile file, String reasonCode, String message, String commandId) {
+    public void save(String deviceId, MultipartFile file, String reasonCode, String message, String commandId,
+                     String person) {
         try {
             String type = file.getContentType() == null ? "image/jpeg" : file.getContentType();
             if (!type.equals("image/png")) type = "image/jpeg";
             captures.put(deviceId, new Capture(seq.incrementAndGet(), file.getBytes(), type, clock.instant(),
-                    reasonCode, message, commandId));
+                    reasonCode, message, commandId, person));
         } catch (IOException ignored) {
             // Preview only; never affects the access decision.
         }

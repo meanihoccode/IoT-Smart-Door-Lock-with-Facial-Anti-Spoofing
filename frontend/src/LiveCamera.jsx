@@ -1,36 +1,10 @@
-import React, { useEffect, useState } from 'react';
-import api from './api';
+import React, { useState } from 'react';
+import { useLiveFrame } from './use-live-frame';
 
-const FRAME_POLL_MS = 350;
-
-// Live door-camera view for admins. Display only: frames never go to the AI or open the door.
-// Polling keeps the device streaming; it stops when the tab is hidden or the view is turned off.
+// Admin view with an on/off toggle.
 export default function LiveCamera({ endpoint = '/admin/door/live', title = 'Camera cửa trực tiếp' }) {
     const [on, setOn] = useState(true);
-    const [src, setSrc] = useState(null);
-    const [waiting, setWaiting] = useState(true);
-
-    useEffect(() => {
-        if (!on) return undefined;
-        let active = true, timer, url;
-        const tick = async () => {
-            if (!document.hidden) {
-                try {
-                    const response = await api.get(endpoint, { responseType: 'blob' });
-                    if (!active) return;
-                    if (response.status === 200) {
-                        const next = URL.createObjectURL(response.data);
-                        setSrc(next); setWaiting(false);
-                        if (url) URL.revokeObjectURL(url);
-                        url = next;
-                    } else setWaiting(true);
-                } catch { if (active) setWaiting(true); }
-            }
-            if (active) timer = setTimeout(tick, FRAME_POLL_MS);
-        };
-        tick();
-        return () => { active = false; clearTimeout(timer); if (url) URL.revokeObjectURL(url); };
-    }, [on, endpoint]);
+    const { src, waiting } = useLiveFrame(endpoint, on);
 
     return (
         <div className="mb-5">

@@ -16,13 +16,16 @@ public class DoorController {
     private final CommandService commands;
     private final LastCaptureStore captures;
     private final LivePreview preview;
+    private final KioskFeed kiosk;
+    private final java.time.Clock clock;
     public DoorController(DoorAccessService access, DeviceStateService devices, CommandService commands,
-                          LastCaptureStore captures, LivePreview preview) {
+                          LastCaptureStore captures, LivePreview preview, KioskFeed kiosk, java.time.Clock clock) {
         this.access = access; this.devices = devices; this.commands = commands; this.captures = captures;
-        this.preview = preview;
+        this.preview = preview; this.kiosk = kiosk; this.clock = clock;
     }
 
-    // Anonymous kiosk view: no names, no images, no credentials.
+    // Anonymous kiosk view: masked names only (KioskFeed), no images, no IDs, no credentials.
+    // serverTime lets the kiosk age events without trusting the browser clock.
     @GetMapping("/door-status")
     public Map<String, Object> doorStatus() {
         var status = devices.status(devices.defaultDeviceId());
@@ -30,15 +33,27 @@ public class DoorController {
         body.put("connection", status.get("connection"));
         body.put("lockdown", status.getOrDefault("lockdown", false));
         body.put("lockdownApplied", status.getOrDefault("lockdownApplied", false));
+        body.put("serverTime", clock.instant().toString());
         var recent = commands.recent(devices.defaultDeviceId(), 1);
-        if (!recent.isEmpty()) {
-            var last = recent.get(0);
+        Map<String, Object> last = recent.isEmpty() ? null : recent.get(0);
+        if (last != null) {
             body.put("lastCommand", Map.of("type", last.get("type"), "status", last.get("status"),
-                    "method", String.valueOf(last.get("method")), "issuedAt", last.get("issuedAt")));
+                    "method", String.valueOf(last.get("method")), "issuedAt", last.get("issuedAt"),
+                    "updatedAt", String.valueOf(last.get("updatedAt"))));
         }
-        var scan = captures.latest(devices.defaultDeviceId());
-        if (scan != null) body.put("lastScan", Map.of("reasonCode", String.valueOf(scan.reasonCode()),
-                "message", String.valueOf(scan.message()), "capturedAt", scan.capturedAt().toString()));
+        var motion = kiosk.lastMotion(devices.defaultDeviceId());
+        if (motion != null) body.put("motionAt", motion.toString());
+        var attempt = kiosk.lastAttempt(devices.defaultDeviceId());
+        if (attempt != null) {
+            var view = new LinkedHashMap<String, Object>();
+            view.put("seq", attempt.seq()); view.put("method", attempt.method());
+            view.put("reasonCode", attempt.reasonCode()); view.put("at", attempt.at().toString());
+            if (attempt.person() != null) view.put("person", attempt.person());
+            // Outcome of this attempt's command, so the kiosk says "door opened" only after the device's ACK.
+            if (attempt.commandId() != null && last != null && attempt.commandId().equals(last.get("commandId")))
+                view.put("commandStatus", last.get("status"));
+            body.put("lastAttempt", view);
+        }
         return body;
     }
 
@@ -57,7 +72,7 @@ public class DoorController {
         var body = new LinkedHashMap<String, Object>();
         body.put("seq", scan.seq()); body.put("capturedAt", scan.capturedAt().toString());
         body.put("reasonCode", scan.reasonCode()); body.put("message", scan.message());
-        body.put("commandId", scan.commandId());
+        body.put("commandId", scan.commandId()); body.put("person", scan.person());
         body.put("imageUrl", "/api/admin/door/last-capture/image?seq=" + scan.seq());
         return ResponseEntity.ok().header("Cache-Control", "no-store").body(body);
     }

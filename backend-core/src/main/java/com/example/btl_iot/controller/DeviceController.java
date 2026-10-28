@@ -33,14 +33,16 @@ public class DeviceController {
     private final DeviceStateService devices;
     private final AlertImageStore images;
     private final LastCaptureStore captures;
+    private final KioskFeed kiosk;
     private final SecurityAlertRepository alerts;
     private final SecurityAuditRepository audits;
     private final Clock clock;
     public DeviceController(DoorAccessService access, FaceGateway faces, DeviceRequestGuard guard, AttemptLimiter limiter,
-                            DeviceStateService devices, AlertImageStore images, LastCaptureStore captures, SecurityAlertRepository alerts,
+                            DeviceStateService devices, AlertImageStore images, LastCaptureStore captures, KioskFeed kiosk,
+                            SecurityAlertRepository alerts,
                             SecurityAuditRepository audits, Clock clock) {
         this.access = access; this.faces = faces; this.guard = guard; this.limiter = limiter; this.devices = devices;
-        this.images = images; this.captures = captures; this.alerts = alerts; this.audits = audits; this.clock = clock;
+        this.images = images; this.captures = captures; this.kiosk = kiosk; this.alerts = alerts; this.audits = audits; this.clock = clock;
     }
 
     @PostMapping("/face")
@@ -52,7 +54,9 @@ public class DeviceController {
         access.ensureNotLocked(device.deviceId());
         // AI has no authority to grant access: Core checks the current profile under a row lock.
         var decision = access.dispatch(access.face(device.deviceId(), faces.identify(file), requestId));
-        captures.save(device.deviceId(), file, decision.reasonCode(), decision.message(), decision.commandId());
+        captures.save(device.deviceId(), file, decision.reasonCode(), decision.message(), decision.commandId(),
+                decision.userName());
+        kiosk.attempt(device.deviceId(), "FACE", decision.reasonCode(), decision.userName(), decision.commandId());
         return AccessResponses.of(decision, requestId);
     }
 
@@ -62,8 +66,9 @@ public class DeviceController {
                                  @RequestHeader(value = "X-Request-Time", required = false) String requestTime) {
         guard.claim(device.deviceId(), requestId, requestTime);
         access.ensureNotLocked(device.deviceId());
-        var decision = access.pin(device.deviceId(), body == null ? null : body.pinCode(), requestId);
-        return AccessResponses.of(access.dispatch(decision), requestId);
+        var decision = access.dispatch(access.pin(device.deviceId(), body == null ? null : body.pinCode(), requestId));
+        kiosk.attempt(device.deviceId(), "PIN", decision.reasonCode(), decision.userName(), decision.commandId());
+        return AccessResponses.of(decision, requestId);
     }
 
     @PostMapping("/alerts")

@@ -4,6 +4,7 @@ import com.example.btl_iot.entity.SecurityAudit;
 import com.example.btl_iot.repository.SecurityAuditRepository;
 import com.example.btl_iot.service.CommandService;
 import com.example.btl_iot.service.DeviceStateService;
+import com.example.btl_iot.service.KioskFeed;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -28,13 +29,15 @@ public class DeviceMessageHandler {
     private final CommandService commands;
     private final DeviceStateService devices;
     private final SecurityAuditRepository audits;
+    private final KioskFeed kiosk;
     // Only suppresses duplicate audits after a resend; bounded and per Core instance.
     private final Set<String> recentEvents = Collections.synchronizedSet(Collections.newSetFromMap(new LinkedHashMap<>() {
         @Override protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) { return size() > 1000; }
     }));
 
-    public DeviceMessageHandler(CommandService commands, DeviceStateService devices, SecurityAuditRepository audits) {
-        this.commands = commands; this.devices = devices; this.audits = audits;
+    public DeviceMessageHandler(CommandService commands, DeviceStateService devices, SecurityAuditRepository audits,
+                                KioskFeed kiosk) {
+        this.commands = commands; this.devices = devices; this.audits = audits; this.kiosk = kiosk;
     }
 
     public void handle(String deviceId, String payload) {
@@ -77,6 +80,8 @@ public class DeviceMessageHandler {
         devices.touch(deviceId);
         String eventId = body.path("eventId").asText("");
         if (!eventId.isEmpty() && !recentEvents.add(deviceId + ":" + eventId)) return;
+        // PIR saw someone: the kiosk shows "analysing" until the face result arrives.
+        if ("PIR_MOTION".equals(body.path("type").asText(""))) kiosk.motion(deviceId);
         String action = AUDITED_EVENTS.get(body.path("type").asText(""));
         if (action != null) audits.save(new SecurityAudit(deviceId, action, null));
     }

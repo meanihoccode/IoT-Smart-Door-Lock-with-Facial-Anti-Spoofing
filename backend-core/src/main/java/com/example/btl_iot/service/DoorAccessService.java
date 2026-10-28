@@ -14,8 +14,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class DoorAccessService {
     public record Result(int code, String status, String message, String reasonCode, String aiRequestId,
-                         String commandId, String commandStatus) {
-        public Result(int code, String status, String message) { this(code, status, message, null, null, null, null); }
+                         String commandId, String commandStatus, String userName) {
+        public Result(int code, String status, String message) { this(code, status, message, null, null, null, null, null); }
+        public Result(int code, String status, String message, String reasonCode, String aiRequestId,
+                      String commandId, String commandStatus) {
+            this(code, status, message, reasonCode, aiRequestId, commandId, commandStatus, null);
+        }
     }
     static final int PIN_DEVICE_LIMIT = 5;
     static final Duration PIN_WINDOW = Duration.ofMinutes(5);
@@ -94,7 +98,7 @@ public class DoorAccessService {
         DoorCommand command = commands.createUnlock(deviceId, method, user == null ? null : user.getId(), requestId, actor);
         record(user, method, "COMMAND_PENDING", deviceId, requestId, command.getId());
         return new Result(202, "success", "Đã xác thực; đang gửi lệnh mở tới thiết bị.", reason, aiRequestId,
-                command.getId(), command.getStatus().name());
+                command.getId(), command.getStatus().name(), user == null ? null : user.getFullName());
     }
 
     // Publish only after the decision transaction committed. Never reports the door as opened.
@@ -103,9 +107,9 @@ public class DoorAccessService {
         DoorCommand command = commands.dispatch(decision.commandId());
         if (command.getStatus() == DoorCommand.Status.FAILED)
             return new Result(503, "error", "Đã xác thực nhưng chưa gửi được lệnh tới thiết bị. Cửa không mở; kiểm tra kết nối.",
-                    "COMMAND_FAILED", decision.aiRequestId(), command.getId(), command.getStatus().name());
+                    "COMMAND_FAILED", decision.aiRequestId(), command.getId(), command.getStatus().name(), decision.userName());
         return new Result(202, "success", "Đã xác thực và gửi lệnh mở tới thiết bị. Chờ thiết bị xác nhận.",
-                decision.reasonCode(), decision.aiRequestId(), command.getId(), command.getStatus().name());
+                decision.reasonCode(), decision.aiRequestId(), command.getId(), command.getStatus().name(), decision.userName());
     }
 
     private AccessLog record(User user, String method, String status, String deviceId, String requestId, String commandId) {

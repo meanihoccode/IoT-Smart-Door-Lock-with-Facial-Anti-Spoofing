@@ -69,6 +69,7 @@ export default function DoorPanel() {
                         <span className={`text-xs font-medium px-2 py-1 rounded-full ${scan.commandId ? TONE_CLASSES.ok : TONE_CLASSES.bad}`}>
                             {scan.reasonCode}
                         </span>
+                        {scan.person && <p className="font-medium text-gray-900 mt-2">{scan.person}</p>}
                         <p className="text-gray-700 mt-2">{scan.message}</p>
                         <p className="text-xs text-gray-400 mt-1">{new Date(scan.capturedAt).toLocaleString('vi-VN')}</p>
                     </div>
