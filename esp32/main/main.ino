@@ -579,6 +579,10 @@ int wifiNetworkCount() { return strlen(WIFI_SSID_2) > 0 ? 2 : 1; }
 void beginWifi(int index) {
   wifiIndex = index % wifiNetworkCount();
   Serial.printf("[WIFI] Đang kết nối tới: %s ...\n", WIFI_NETWORKS[wifiIndex].ssid);
+  // Dừng lần kết nối đang dở trước khi đổi mạng; nếu không ESP-IDF báo
+  // "sta is connecting, cannot set config" và vẫn kẹt ở mạng cũ.
+  WiFi.disconnect(false, false);
+  delay(100);
   WiFi.begin(WIFI_NETWORKS[wifiIndex].ssid, WIFI_NETWORKS[wifiIndex].password);
 }
 
@@ -588,7 +592,8 @@ void connectWiFi() {
   delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); // Tắt sleep để module RF giữ công suất tối đa
-  WiFi.setAutoReconnect(true);
+  // loop() tự xoay vòng mạng; auto-reconnect của thư viện sẽ bám mạng cũ và tranh với việc đổi mạng.
+  WiFi.setAutoReconnect(false);
 
   // Lúc khởi động: thử lần lượt từng mạng, mỗi mạng tối đa 10 giây.
   for (int n = 0; n < wifiNetworkCount() && WiFi.status() != WL_CONNECTED; n++) {
