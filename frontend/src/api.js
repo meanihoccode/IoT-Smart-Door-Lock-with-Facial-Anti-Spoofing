@@ -12,8 +12,7 @@ api.interceptors.request.use(async (config) => {
 });
 api.interceptors.response.use(undefined, (error) => {
   const url = error.config?.url || '';
-  if (error.response?.status === 401 &&
-      !['/auth/login', '/verify-pin', '/verify-face'].includes(url)) {
+  if (error.response?.status === 401 && !['/auth/login'].includes(url)) {
     window.dispatchEvent(new Event('smartlock:session-expired'));
   }
   return Promise.reject(error);

@@ -37,15 +37,22 @@ public class FaceGateway {
         public String reasonCode() { return reasonCode; }
         public String requestId() { return requestId; }
     }
+    public static final String DEFAULT_BASE_URL = "http://localhost:8000/api/";
     private final RestTemplate client;
-    // Use the shared timeout policy from HttpClientConfig (connect 3s, read 20s).
-    public FaceGateway(RestTemplate client) { this.client = client; }
+    private final String baseUrl;
+    // Use the shared timeout policy from HttpClientConfig. The AI URL points at a private network address.
+    @org.springframework.beans.factory.annotation.Autowired
+    public FaceGateway(RestTemplate client, @org.springframework.beans.factory.annotation.Value("${smartlock.ai.base-url:" + DEFAULT_BASE_URL + "}") String baseUrl) {
+        this.client = client;
+        this.baseUrl = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+    }
+    public FaceGateway(RestTemplate client) { this(client, DEFAULT_BASE_URL); }
     private JsonNode call(String path, MultipartFile file) {
         var parts = new LinkedMultiValueMap<String, Object>();
         parts.add("file", file.getResource());
         var headers = new HttpHeaders(); headers.setContentType(MediaType.MULTIPART_FORM_DATA);
         try {
-            var result = client.postForObject("http://localhost:8000/api/" + path, new HttpEntity<>(parts, headers), JsonNode.class);
+            var result = client.postForObject(baseUrl + path, new HttpEntity<>(parts, headers), JsonNode.class);
             if (result == null) throw new AiFailure("INVALID_AI_RESPONSE", null);
             return result;
         } catch (ResourceAccessException ex) {
@@ -92,7 +99,7 @@ public class FaceGateway {
                 throw invalid(result);
             return new FaceMatch(id.asLong(), false, "FACE_VERIFIED", requestId(result));
         } catch (AiFailure failure) {
-            // Return a denial so DoorAccessService records the failed attempt, never publishes MQTT.
+            // Return a denial so DoorAccessService records the failed attempt, never creates a command.
             return FaceMatch.rejected(failure.reasonCode(), failure.requestId());
         }
     }
@@ -143,7 +150,7 @@ public class FaceGateway {
             default -> "Không thể xác thực hoặc hồ sơ không được phép vào.";
         };
     }
-    private void validateImage(MultipartFile file) {
+    public static void validateImage(MultipartFile file) {
         if (file == null || file.isEmpty() || file.getSize() > 5L * 1024 * 1024)
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cần ảnh JPEG/PNG, tối đa 5 MB.");
         try (var source = file.getInputStream(); var stream = ImageIO.createImageInputStream(source)) {

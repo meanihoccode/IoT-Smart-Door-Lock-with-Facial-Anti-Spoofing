@@ -1,0 +1,35 @@
+# No ACME contact email is configured: Let's Encrypt issues and Caddy renews certificates without one,
+# so no personal data is shared. Add a global "{ email you@example.com }" block only if you want notices.
+
+# Same origin for the React app and the API, so session cookies stay SameSite=Strict and Secure.
+{$SMARTLOCK_DOMAIN} {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Matches Core's multipart limit (5 MB file, 6 MB request) with a little headroom.
+	request_body /api/* {
+		max_size 7MB
+	}
+
+	handle /api/* {
+		reverse_proxy core:8080
+	}
+
+	# Device command channel (wss). Caddy proxies the WebSocket upgrade; TLS ends here like for REST.
+	handle /ws/* {
+		reverse_proxy core:8080
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

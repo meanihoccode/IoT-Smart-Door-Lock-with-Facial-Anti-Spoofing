@@ -32,17 +32,19 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestTemplate;
 
 import com.example.btl_iot.entity.AccessLog;
+import com.example.btl_iot.entity.DoorCommand;
 import com.example.btl_iot.entity.User;
-import com.example.btl_iot.mqtt.MqttPublisher;
 import com.example.btl_iot.repository.AccessLogRepository;
 import com.example.btl_iot.repository.UserRepository;
 
-class ApiControllerFaceVerificationTests {
+// AI result -> access decision for an authenticated device upload. A command is created only for a full match.
+class DeviceFaceDecisionTests {
 
     private UserRepository userRepository;
     private AccessLogRepository accessLogRepository;
-    private MqttPublisher mqttPublisher;
-    private ApiController controller;
+    private CommandService commands;
+    private DoorAccessService access;
+    private FaceGateway gateway;
     private MockRestServiceServer aiServer;
     private MockMultipartFile faceImage;
 
@@ -50,13 +52,16 @@ class ApiControllerFaceVerificationTests {
     void setUp() throws Exception {
         userRepository = mock(UserRepository.class);
         accessLogRepository = mock(AccessLogRepository.class);
-        mqttPublisher = mock(MqttPublisher.class);
+        commands = mock(CommandService.class);
         RestTemplate restTemplate = new RestTemplate();
         aiServer = MockRestServiceServer.bindTo(restTemplate).build();
-        var access = new DoorAccessService(userRepository, accessLogRepository, mock(SecurityAuditRepository.class),
-                mqttPublisher, mock(PasswordEncoder.class), new AttemptLimiter());
-        controller = new ApiController(userRepository, accessLogRepository, mock(ProfileService.class),
-                access, new FaceGateway(restTemplate));
+        access = new DoorAccessService(userRepository, accessLogRepository, mock(SecurityAuditRepository.class),
+                commands, mock(PasswordEncoder.class), new AttemptLimiter(), mock(DeviceStateService.class));
+        gateway = new FaceGateway(restTemplate);
+        var pending = mock(DoorCommand.class);
+        when(pending.getId()).thenReturn("cmd-1");
+        when(pending.getStatus()).thenReturn(DoorCommand.Status.PENDING);
+        when(commands.createUnlock(any(), any(), any(), any(), any())).thenReturn(pending);
         var bytes = new ByteArrayOutputStream();
         ImageIO.write(new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", bytes);
         faceImage = new MockMultipartFile(
@@ -85,11 +90,11 @@ class ApiControllerFaceVerificationTests {
                 }
                 """.formatted(faceCount));
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(401);
         assertThat(body(response).get("reasonCode")).isEqualTo("SPOOF_DETECTED");
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -107,11 +112,11 @@ class ApiControllerFaceVerificationTests {
                 }
                 """);
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(503);
         assertThat(body(response).get("reasonCode")).isEqualTo("MODEL_UNAVAILABLE");
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -134,15 +139,15 @@ class ApiControllerFaceVerificationTests {
     void everyStandardErrorReasonNeverPublishesOpenCommand(String reasonCode) {
         respondWith(errorResponse(reasonCode));
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().isError()).isTrue();
         assertThat(body(response).get("reasonCode")).isEqualTo(reasonCode);
-        assertThat(body(response).get("requestId")).isEqualTo("req-error");
+        assertThat(body(response).get("aiRequestId")).isEqualTo("req-error");
         assertThat(response.getStatusCode().value()).isEqualTo(FaceGateway.statusFor(reasonCode));
         verify(accessLogRepository).saveAndFlush(argThat(log -> reasonCode.equals(log.getStatus())));
         verify(userRepository, never()).findLockedById(any());
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -150,11 +155,11 @@ class ApiControllerFaceVerificationTests {
     void malformedSuccessWithoutUserIdNeverPublishesOpenCommand() {
         respondWith(successResponse("null"));
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(502);
         assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -163,11 +168,11 @@ class ApiControllerFaceVerificationTests {
         respondWith(successResponse("99"));
         when(userRepository.findLockedById(99L)).thenReturn(Optional.empty());
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(502);
         assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -177,12 +182,12 @@ class ApiControllerFaceVerificationTests {
                 "\"similarity\":0.71",
                 "\"similarity\":0.49"));
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(502);
         assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
         verify(userRepository, never()).findLockedById(any());
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -195,13 +200,13 @@ class ApiControllerFaceVerificationTests {
         user.setFullName("Test User");
         user.setFaceEmbedding("[1]");
         when(userRepository.findLockedById(7L)).thenReturn(Optional.of(user));
-        when(mqttPublisher.sendOpenDoorCommand()).thenReturn(true);
+        dispatchReturns(DoorCommand.Status.PUBLISHED);
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
-        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
         assertThat(body(response).get("reasonCode")).isEqualTo("FACE_VERIFIED");
-        verify(mqttPublisher).sendOpenDoorCommand();
+        verify(commands).dispatch("cmd-1");
         aiServer.verify();
     }
 
@@ -210,12 +215,12 @@ class ApiControllerFaceVerificationTests {
     void invalidFaceCountNeverPublishesOpenCommand(String faceCount) {
         respondWith(successResponse("7").replace("\"faceCount\":1", "\"faceCount\":" + faceCount));
 
-        ResponseEntity<?> response = controller.verifyFace(faceImage);
+        ResponseEntity<?> response = verifyFace(faceImage);
 
         assertThat(response.getStatusCode().value()).isEqualTo(502);
         assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
         verify(userRepository, never()).findLockedById(any());
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -252,11 +257,11 @@ class ApiControllerFaceVerificationTests {
         String valid = successResponse("7");
         assertThat(valid).contains(from);
         respondWith(valid.replace(from, to));
-        var response = controller.verifyFace(faceImage);
+        var response = verifyFace(faceImage);
         assertThat(response.getStatusCode().value()).isEqualTo(502);
         assertThat(body(response).get("reasonCode")).isEqualTo("INVALID_AI_RESPONSE");
         verify(userRepository, never()).findLockedById(any());
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         aiServer.verify();
     }
 
@@ -267,26 +272,25 @@ class ApiControllerFaceVerificationTests {
         User user = new User(); user.setId(7L);
         user.setEnabled(!revoked); user.setFaceEmbedding(revoked ? "[1]" : null);
         when(userRepository.findLockedById(7L)).thenReturn(Optional.of(user));
-        var response = controller.verifyFace(faceImage);
+        var response = verifyFace(faceImage);
         assertThat(response.getStatusCode().value()).isEqualTo(401);
         assertThat(body(response).get("reasonCode")).isEqualTo("PROFILE_NOT_ALLOWED");
-        verify(mqttPublisher, never()).sendOpenDoorCommand();
+        verify(commands, never()).createUnlock(any(), any(), any(), any(), any());
         verify(accessLogRepository).saveAndFlush(argThat(log -> "PROFILE_NOT_ALLOWED".equals(log.getStatus())));
         aiServer.verify();
     }
 
     @Test
-    void recognizedFaceButBrokerFailureIsNotSuccess() {
+    void recognizedFaceButCommandChannelFailureIsNotSuccess() {
         respondWith(successResponse("7"));
         User user = new User(); user.setId(7L); user.setFaceEmbedding("[1]");
         when(userRepository.findLockedById(7L)).thenReturn(Optional.of(user));
-        when(mqttPublisher.sendOpenDoorCommand()).thenReturn(false);
-        var response = controller.verifyFace(faceImage);
+        dispatchReturns(DoorCommand.Status.FAILED);
+        var response = verifyFace(faceImage);
         assertThat(response.getStatusCode().value()).isEqualTo(503);
         assertThat(body(response).get("reasonCode")).isEqualTo("COMMAND_FAILED");
-        assertThat(body(response).get("requestId")).isEqualTo("req-success");
-        verify(mqttPublisher).sendOpenDoorCommand();
-        verify(accessLogRepository).save(argThat(log -> "COMMAND_FAILED".equals(log.getStatus())));
+        assertThat(body(response).get("aiRequestId")).isEqualTo("req-success");
+        verify(commands).dispatch("cmd-1");
         aiServer.verify();
     }
 
@@ -316,6 +320,18 @@ class ApiControllerFaceVerificationTests {
                   "recognition":{"status":"NOT_RUN","recognized":false,"threshold":0.5,"gallerySize":0}
                 }
                 """.formatted(reasonCode);
+    }
+
+    // Same sequence as DeviceController.face after the request guard.
+    private ResponseEntity<?> verifyFace(MockMultipartFile file) {
+        return AccessResponses.of(access.dispatch(access.face("door-01", gateway.identify(file), "dev-req-1")), "dev-req-1");
+    }
+
+    private void dispatchReturns(DoorCommand.Status status) {
+        var dispatched = mock(DoorCommand.class);
+        when(dispatched.getId()).thenReturn("cmd-1");
+        when(dispatched.getStatus()).thenReturn(status);
+        when(commands.dispatch("cmd-1")).thenReturn(dispatched);
     }
 
     @SuppressWarnings("unchecked")

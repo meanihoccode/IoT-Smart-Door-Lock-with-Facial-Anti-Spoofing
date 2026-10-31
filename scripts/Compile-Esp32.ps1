@@ -1,5 +1,7 @@
+# Compile only; never uploads. The board is ESP32-S3 N16R8 (16 MB flash, 8 MB octal PSRAM), so there is no
+# default FQBN: verify options with `arduino-cli board details -b esp32:esp32:esp32s3` and pass them explicitly.
 param(
-    [string]$Fqbn = 'esp32:esp32:esp32',
+    [Parameter(Mandatory = $true)][string]$Fqbn,
     [string]$CliPath = $env:ARDUINO_CLI,
     [string]$ConfigPath = ''
 )
@@ -26,10 +28,17 @@ if ($ConfigPath) {
 $sketchPath = Join-Path $projectRoot ('.runtime\sketch\' + [guid]::NewGuid().ToString('N') + '\main')
 $buildPath = Join-Path $projectRoot '.runtime\esp32-build'
 New-Item -ItemType Directory -Force $sketchPath | Out-Null
-# Arduino requires the main sketch filename to match its directory name.
-Copy-Item -LiteralPath (Join-Path $projectRoot 'esp32\main.ino') -Destination (Join-Path $sketchPath 'main.ino')
-Get-ChildItem -LiteralPath (Join-Path $projectRoot 'esp32') -Filter '*.h' -File | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $sketchPath
+# Canonical firmware source is the Arduino IDE sketch folder esp32/main. Required libraries (Library Manager):
+# Keypad, ESP32Servo, WebSockets (Markus Sattler) 2.7.2.
+Get-ChildItem -LiteralPath (Join-Path $projectRoot 'esp32\main') -File |
+    Where-Object { $_.Extension -in '.ino', '.cpp', '.h' } |
+    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $sketchPath }
+# Private config.h (if any) wins over the placeholder example.
+foreach ($name in 'config.h', 'config.example.h') {
+    $candidate = Join-Path $projectRoot ('esp32\' + $name)
+    if ((Test-Path -LiteralPath $candidate) -and -not (Test-Path -LiteralPath (Join-Path $sketchPath $name))) {
+        Copy-Item -LiteralPath $candidate -Destination $sketchPath
+    }
 }
 & $CliPath compile @configArguments --fqbn $Fqbn --build-path $buildPath $sketchPath
 if ($LASTEXITCODE -ne 0) { throw 'ESP32 compilation failed.' }

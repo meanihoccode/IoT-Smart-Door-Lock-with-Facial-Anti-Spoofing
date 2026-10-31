@@ -2,113 +2,119 @@ package com.example.btl_iot.service;
 
 import com.example.btl_iot.entity.*;
 import com.example.btl_iot.repository.*;
-import com.example.btl_iot.mqtt.MqttPublisher;
 import com.example.btl_iot.security.*;
 import java.time.Duration;
-import java.util.Locale;
+import java.util.List;
+import java.util.Objects;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+// Decides access and creates at most one command per request. Callers dispatch the command after commit.
 @Service
 public class DoorAccessService {
-    public record Result(int code, String status, String message, String reasonCode, String requestId) {
-        public Result(int code, String status, String message) { this(code, status, message, null, null); }
+    public record Result(int code, String status, String message, String reasonCode, String aiRequestId,
+                         String commandId, String commandStatus, String userName) {
+        public Result(int code, String status, String message) { this(code, status, message, null, null, null, null, null); }
+        public Result(int code, String status, String message, String reasonCode, String aiRequestId,
+                      String commandId, String commandStatus) {
+            this(code, status, message, reasonCode, aiRequestId, commandId, commandStatus, null);
+        }
     }
+    static final int PIN_DEVICE_LIMIT = 5;
+    static final Duration PIN_WINDOW = Duration.ofMinutes(5);
+    private static final String GENERIC_DENIAL = "Không thể xác thực hoặc hồ sơ không được phép vào.";
     private final UserRepository users;
     private final AccessLogRepository logs;
     private final SecurityAuditRepository audits;
-    private final MqttPublisher mqtt;
+    private final CommandService commands;
     private final PasswordEncoder encoder;
     private final AttemptLimiter limiter;
-    private final DoorStateService doorState;
-    private final String dummyHash;
+    private final DeviceStateService devices;
     public DoorAccessService(UserRepository users, AccessLogRepository logs, SecurityAuditRepository audits,
-                             MqttPublisher mqtt, PasswordEncoder encoder, AttemptLimiter limiter,
-                             DoorStateService doorState) {
-        this.users = users; this.logs = logs; this.audits = audits; this.mqtt = mqtt;
-        this.encoder = encoder; this.limiter = limiter; this.doorState = doorState;
-        dummyHash = encoder.encode("not-a-valid-numeric-pin");
+                             CommandService commands, PasswordEncoder encoder, AttemptLimiter limiter,
+                             DeviceStateService devices) {
+        this.users = users; this.logs = logs; this.audits = audits; this.commands = commands;
+        this.encoder = encoder; this.limiter = limiter; this.devices = devices;
     }
-    @Transactional
-    public Result pin(String username, String pin, String ip) {
-        if (doorState.isEmergencyLockdown()) {
-            return new Result(403, "error", "Cửa đang bị vô hiệu hóa khẩn cấp bởi Quản trị viên.");
-        }
-        ProfileRules.pin(pin);
-        limiter.consume("pin:ip:" + ip, 20, Duration.ofMinutes(5));
 
-        if (username != null && !username.isBlank()) {
-            InputRules.username(username);
-            String key = "pin:user:" + username.toLowerCase(Locale.ROOT);
-            // Acquire the row before checking the secret. Revocation/reset uses the same row lock.
-            User user = users.findLockedByUsername(username).orElse(null);
-            int attempt = limiter.consume(key, 3, Duration.ofMinutes(5));
-            String hash = user == null || user.getPinHash() == null ? dummyHash : user.getPinHash();
-            boolean matches = encoder.matches(pin, hash);
-            if (!matches || user == null || !user.isEnabled()) {
-                if (attempt == 3) audits.save(new SecurityAudit(username, "PIN_THROTTLED", user == null ? null : user.getId().toString()));
-                return denied(user, "PIN", "FAILED");
-            }
-            limiter.clear(key);
-            return open(user, "PIN");
-        } else {
-            // Phương án A: Chỉ nhập mã PIN trực tiếp (không cần username)
-            var enabledUsers = users.findAll().stream().filter(User::isEnabled).toList();
-            User matchedUser = null;
-            for (User u : enabledUsers) {
-                if (u.getPinHash() != null && encoder.matches(pin, u.getPinHash())) {
-                    matchedUser = u;
-                    break;
-                }
-            }
-            if (matchedUser == null) {
-                return denied(null, "PIN", "FAILED");
-            }
-            return open(matchedUser, "PIN");
-        }
+    // Cheap early exit before calling AI. CommandService re-checks under the device row lock.
+    public void ensureNotLocked(String deviceId) {
+        if (devices.isLockdown(deviceId)) throw new CommandService.LockdownActive();
     }
+
+    // Only reachable from an authenticated device (see DeviceController); browsers have no face-unlock path.
     @Transactional
-    public Result face(FaceGateway.FaceMatch match) {
-        if (doorState.isEmergencyLockdown()) {
-            return new Result(403, "error", "Cửa đang bị vô hiệu hóa khẩn cấp bởi Quản trị viên.");
-        }
+    public Result face(String deviceId, FaceGateway.FaceMatch match, String requestId) {
         if (!"FACE_VERIFIED".equals(match.reasonCode()) || match.spoof()) {
             String reason = match.spoof() ? "SPOOF_DETECTED" : match.reasonCode();
-            record(null, "FACE", reason);
-            return new Result(FaceGateway.statusFor(reason), "error", FaceGateway.messageFor(reason), reason, match.requestId());
+            record(null, "FACE", reason, deviceId, requestId, null);
+            return new Result(FaceGateway.statusFor(reason), "error", FaceGateway.messageFor(reason), reason,
+                    match.requestId(), null, null);
         }
         User user = match.userId() == null ? null : users.findLockedById(match.userId()).orElse(null);
         if (user == null) {
-            record(null, "FACE", "INVALID_AI_RESPONSE");
-            return new Result(502, "error", FaceGateway.messageFor("INVALID_AI_RESPONSE"), "INVALID_AI_RESPONSE", match.requestId());
+            record(null, "FACE", "INVALID_AI_RESPONSE", deviceId, requestId, null);
+            return new Result(502, "error", FaceGateway.messageFor("INVALID_AI_RESPONSE"), "INVALID_AI_RESPONSE",
+                    match.requestId(), null, null);
         }
         if (!user.isEnabled() || user.getFaceEmbedding() == null || user.getFaceEmbedding().isBlank()) {
-            Result denied = denied(user, "FACE", "PROFILE_NOT_ALLOWED");
-            return new Result(denied.code(), denied.status(), denied.message(), "PROFILE_NOT_ALLOWED", match.requestId());
+            record(user, "FACE", "PROFILE_NOT_ALLOWED", deviceId, requestId, null);
+            return new Result(401, "error", GENERIC_DENIAL, "PROFILE_NOT_ALLOWED", match.requestId(), null, null);
         }
-        Result result = open(user, "FACE");
-        return new Result(result.code(), result.status(), result.message(),
-                result.code() == 200 ? "FACE_VERIFIED" : "COMMAND_FAILED", match.requestId());
+        return grant(user, "FACE", "FACE_VERIFIED", deviceId, requestId, null, match.requestId());
     }
-    private Result denied(User user, String method, String status) {
-        record(user, method, status);
-        return new Result(401, "error", "Không thể xác thực hoặc hồ sơ không được phép vào.");
-    }
-    private Result open(User user, String method) {
-        // Fail before publishing if the audit row cannot be written.
-        AccessLog log = record(user, method, "COMMAND_PENDING");
-        boolean sent = mqtt.sendOpenDoorCommand();
-        log.setStatus(sent ? "SUCCESS" : "COMMAND_FAILED");
-        logs.save(log);
-        if (sent) {
-            doorState.notifyDoorUnlocked(method, "Mở cửa thành công: " + (user != null ? user.getFullName() : "Ngoại tuyến"));
+
+    // D04: keypad PIN without username. Failures are limited per device; a PIN shared by two profiles is refused.
+    @Transactional
+    public Result pin(String deviceId, String pin, String requestId) {
+        String key = "pin:device:" + deviceId;
+        limiter.check(key, PIN_DEVICE_LIMIT);
+        boolean wellFormed = pin != null && pin.matches("[0-9]{6,10}");
+        List<User> matches = !wellFormed ? List.of() : users.findAll().stream()
+                .filter(User::isEnabled).filter(u -> u.getPinHash() != null)
+                .filter(u -> encoder.matches(pin, u.getPinHash())).toList();
+        User user = matches.size() == 1 ? users.findLockedById(matches.get(0).getId()).orElse(null) : null;
+        // Re-check under the row lock: revocation or PIN reset may have committed after the scan.
+        if (user == null || !user.isEnabled() || !Objects.equals(user.getPinHash(), matches.get(0).getPinHash())) {
+            int attempt = limiter.consume(key, PIN_DEVICE_LIMIT, PIN_WINDOW);
+            if (matches.size() > 1) audits.save(new SecurityAudit(deviceId, "PIN_AMBIGUOUS", null));
+            if (attempt == PIN_DEVICE_LIMIT) audits.save(new SecurityAudit(deviceId, "PIN_THROTTLED", null));
+            record(null, "PIN", matches.size() > 1 ? "PIN_AMBIGUOUS" : "FAILED", deviceId, requestId, null);
+            return new Result(401, "error", GENERIC_DENIAL, "PIN_REJECTED", null, null, null);
         }
-        return sent ? new Result(200, "success", "Đã xác thực và gửi lệnh mở cửa.")
-                : new Result(503, "error", "Đã xác thực nhưng chưa xác nhận được việc gửi lệnh. Kiểm tra trạng thái cửa và kết nối thiết bị.");
+        limiter.clear(key);
+        return grant(user, "PIN", "PIN_VERIFIED", deviceId, requestId, null, null);
     }
-    private AccessLog record(User user, String method, String status) {
+
+    @Transactional
+    public Result remoteOpen(String admin) {
+        audits.save(new SecurityAudit(admin, "REMOTE_OPEN_REQUESTED", devices.defaultDeviceId()));
+        return grant(null, "REMOTE_ADMIN", "REMOTE_OPEN", devices.defaultDeviceId(), null, admin, null);
+    }
+
+    private Result grant(User user, String method, String reason, String deviceId, String requestId,
+                         String actor, String aiRequestId) {
+        DoorCommand command = commands.createUnlock(deviceId, method, user == null ? null : user.getId(), requestId, actor);
+        record(user, method, "COMMAND_PENDING", deviceId, requestId, command.getId());
+        return new Result(202, "success", "Đã xác thực; đang gửi lệnh mở tới thiết bị.", reason, aiRequestId,
+                command.getId(), command.getStatus().name(), user == null ? null : user.getFullName());
+    }
+
+    // Publish only after the decision transaction committed. Never reports the door as opened.
+    public Result dispatch(Result decision) {
+        if (decision.commandId() == null) return decision;
+        DoorCommand command = commands.dispatch(decision.commandId());
+        if (command.getStatus() == DoorCommand.Status.FAILED)
+            return new Result(503, "error", "Đã xác thực nhưng chưa gửi được lệnh tới thiết bị. Cửa không mở; kiểm tra kết nối.",
+                    "COMMAND_FAILED", decision.aiRequestId(), command.getId(), command.getStatus().name(), decision.userName());
+        return new Result(202, "success", "Đã xác thực và gửi lệnh mở tới thiết bị. Chờ thiết bị xác nhận.",
+                decision.reasonCode(), decision.aiRequestId(), command.getId(), command.getStatus().name(), decision.userName());
+    }
+
+    private AccessLog record(User user, String method, String status, String deviceId, String requestId, String commandId) {
         var log = new AccessLog(); log.setUser(user); log.setAccessMethod(method); log.setStatus(status);
+        log.setDeviceId(deviceId); log.setRequestId(requestId); log.setCommandId(commandId);
         return logs.saveAndFlush(log);
     }
 }

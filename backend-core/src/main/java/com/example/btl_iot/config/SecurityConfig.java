@@ -1,8 +1,12 @@
 package com.example.btl_iot.config;
 
 import com.example.btl_iot.repository.AdminAccountRepository;
+import com.example.btl_iot.repository.DeviceRepository;
+import com.example.btl_iot.repository.SecurityAuditRepository;
 import com.example.btl_iot.security.*;
 import org.springframework.context.annotation.*;
+import org.springframework.core.annotation.Order;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.*;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -27,19 +31,28 @@ public class SecurityConfig {
         provider.setPasswordEncoder(encoder);
         return new ProviderManager(provider);
     }
-    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, AdminAccountRepository admins,
-            AdminSessionPolicy sessions, com.example.btl_iot.repository.SecurityAuditRepository audits) throws Exception {
+    // Device REST API and the device WebSocket handshake: bearer token per device, stateless, no cookies,
+    // so CSRF does not apply. The handshake's authenticated principal becomes the WebSocket session identity.
+    @Bean @Order(1) SecurityFilterChain deviceFilterChain(HttpSecurity http, DeviceRepository devices,
+            AttemptLimiter limiter, SecurityAuditRepository audits) throws Exception {
+        http
+            .securityMatcher("/api/device/**", "/ws/device")
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .requestCache(cache -> cache.disable())
+            .formLogin(form -> form.disable())
+            .httpBasic(basic -> basic.disable())
+            .logout(logout -> logout.disable())
+            .authorizeHttpRequests(auth -> auth.anyRequest().hasRole("DEVICE"))
+            .addFilterBefore(new DeviceAuthFilter(devices, limiter, audits), AuthorizationFilter.class);
+        return http.build();
+    }
+    @Bean @Order(2) SecurityFilterChain securityFilterChain(HttpSecurity http, AdminAccountRepository admins,
+            AdminSessionPolicy sessions, SecurityAuditRepository audits) throws Exception {
         http
             .csrf(csrf -> csrf
                 .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
-                .ignoringRequestMatchers(
-                    "/api/verify-pin",
-                    "/api/verify-face",
-                    "/api/security-alerts",
-                    "/api/security-alerts/images/**",
-                    "/api/lockdown/status",
-                    "/api/door-status"
-                ))
+                .ignoringRequestMatchers("/api/door-status"))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
             .requestCache(cache -> cache.disable())
             .formLogin(form -> form.disable())
@@ -47,10 +60,8 @@ public class SecurityConfig {
             .logout(logout -> logout.disable())
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(HttpMethod.GET, "/api/auth/csrf").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/kiosk", "/api/verify-pin", "/api/verify-face").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/security-alerts").permitAll()
-                .requestMatchers(HttpMethod.GET, "/api/security-alerts/images/**").permitAll()
-                .requestMatchers(HttpMethod.GET, "/api/lockdown/status", "/api/door-status").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/auth/login", "/api/auth/kiosk").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/door-status", "/api/kiosk/live").permitAll()
                 .requestMatchers(
                     "/api/auth/**",
                     "/api/admin/**",
@@ -60,6 +71,7 @@ public class SecurityConfig {
                     "/api/overview",
                     "/api/security-alerts",
                     "/api/security-alerts/**",
+                    "/api/lockdown/status",
                     "/api/lockdown/toggle"
                 ).hasRole("ADMIN")
                 .anyRequest().denyAll())

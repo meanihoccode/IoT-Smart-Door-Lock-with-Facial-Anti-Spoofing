@@ -1,78 +1,97 @@
 /*
  * ============================================================================
- * HỆ THỐNG KHÓA CỬA THÔNG MINH AIoT - ESP32-S3 WROOM N16R8 CAM
+ * HỆ THỐNG KHÓA CỬA THÔNG MINH AIoT - ESP32-S3 WROOM N16R8 CAM (IoT Level 3)
  * Bo mạch: ESP32-S3 WROOM N16R8 CAM (16MB Flash, 8MB Octal PSRAM, OV2640)
- * Tích hợp: 
- *   - Camera OV2640: Web Server cổng 80 (/capture snapshot live + /status)
- *   - Đồng bộ dữ liệu mở cửa 2 chiều với Backend Core (:8080) và Kiosk
- *   - AI Face Recognition (Backend Core :8080 proxy sang FastAPI :8000)
- *   - Bàn phím ma trận Keypad 4x4 (Mở khóa mã PIN 6 số, Phím 'D' gọi chuông)
- *   - Cảm biến PIR (Tự bật LED và chụp ảnh xác thực khuôn mặt)
- *   - Cảnh báo kẻ lạ khi quét mặt thất bại > 5 lần (Buzzer + chụp ảnh gửi Admin)
- *   - Cảnh báo khi nhập sai mã PIN 3 lần liên tiếp (Buzzer + chụp ảnh gửi Admin)
- *   - Khóa khẩn cấp (Emergency Lockdown): Vô hiệu hóa mở cửa khi Admin ra lệnh
- *   - Cơ cấu chấp hành: Động cơ Servo 90 độ + Module Relay 5V + Còi Buzzer 5V
+ * Vai trò: nút local duy nhất. Thu ảnh/PIN/cảm biến và điều khiển chấp hành;
+ * liveness, nhận diện và quyết định nghiệp vụ chạy trên cloud.
+ *   - REST qua HTTPS (xác thực thiết bị): gửi ảnh khuôn mặt, PIN keypad, cảnh báo có ảnh
+ *   - WebSocket bảo mật (wss, kết nối giữ liên tục): nhận command JSON (commandId/seq/TTL),
+ *     gửi ACK, trạng thái, sự kiện — đúng sơ đồ IoT Level 3 "REST/WebSocket"
+ *   - Chỉ mở khóa khi nhận command hợp lệ qua WebSocket (docs/DEVICE_CONTRACT.md)
+ *   - Bàn phím 4x4 (PIN 6 số, phím 'D' gọi chuông/quét mặt), cảm biến PIR
+ *   - Khóa khẩn cấp lưu NVS; timer khóa lại chạy bằng esp_timer độc lập vòng loop
+ *   - Không có master PIN, không có web server LAN, không log bí mật
  * ============================================================================
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WebServer.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#if __has_include("PubSubClient.h")
-#include "PubSubClient.h"
-#else
-#include <PubSubClient.h>
-#endif
+#include <WebSocketsClient.h> // thư viện "WebSockets" (Markus Sattler) 2.7.2
 #include "esp_camera.h"
+#include "esp_timer.h"
+#include "esp_system.h"
 #include <Keypad.h>
 #include <ESP32Servo.h>
+#include <Preferences.h>
+#include <time.h>
 
 #if __has_include("config.h")
 #include "config.h"
 #elif __has_include("../config.h")
 #include "../config.h"
-#else
+#elif __has_include("config.example.h")
 #include "config.example.h"
+#else
+#include "../config.example.h"
 #endif
 
 // ============================================================================
-// 1. CẤU HÌNH MẠNG WI-FI, BACKEND VÀ MQTT
+// 1. CẤU HÌNH MẠNG, CLOUD VÀ DANH TÍNH THIẾT BỊ (giá trị thật nằm trong config.h)
 // ============================================================================
 #ifndef WIFI_SSID
 #define WIFI_SSID "YOUR_WIFI_SSID"
 #endif
-
 #ifndef WIFI_PASSWORD
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 #endif
-
-#ifndef MQTT_SERVER
-#define MQTT_SERVER "192.168.1.100"
+// Mạng dự phòng (tùy chọn), ví dụ hotspot điện thoại khi demo ở nơi khác. Để trống nếu không dùng.
+#ifndef WIFI_SSID_2
+#define WIFI_SSID_2 ""
+#endif
+#ifndef WIFI_PASSWORD_2
+#define WIFI_PASSWORD_2 ""
+#endif
+// Một tên miền cloud cho cả REST (https://CLOUD_HOST:CLOUD_PORT/api/...) và WebSocket (wss://.../ws/device).
+#ifndef CLOUD_HOST
+#define CLOUD_HOST "smartlock.example.com"
+#endif
+#ifndef CLOUD_PORT
+#define CLOUD_PORT 443
+#endif
+#ifndef WS_PATH
+#define WS_PATH "/ws/device"
+#endif
+#ifndef DEVICE_ID
+#define DEVICE_ID "door-01"
+#endif
+#ifndef DEVICE_TOKEN
+#define DEVICE_TOKEN ""
+#endif
+#ifndef NTP_SERVER
+#define NTP_SERVER "pool.ntp.org"
+#endif
+#ifndef SMARTLOCK_HAS_ROOT_CA
+static const char ROOT_CA_PEM[] = "";
 #endif
 
-const char* wifi_ssid     = WIFI_SSID;
-const char* wifi_password = WIFI_PASSWORD;
-const char* server_ip     = MQTT_SERVER;
-
-// Endpoint Backend Core (Spring Boot cổng 8080 - đồng bộ CSDL và nhật ký)
-String backendVerifyUrl   = String("http://") + server_ip + ":8080/api/verify-face";
-String backendPinUrl      = String("http://") + server_ip + ":8080/api/verify-pin";
-String backendAlertUrl    = String("http://") + server_ip + ":8080/api/security-alerts";
-
-// Topic MQTT
-const char* MQTT_TOPIC_SUB = "iot/lock/commands"; // Lắng nghe lệnh từ Web Kiosk / Admin
-const char* MQTT_TOPIC_PUB = "iot/lock/events";   // Gửi sự kiện mở cửa, PIR, cảnh báo
-
-// Mã PIN dự phòng offline trên Keypad 4x4
-const String MASTER_PIN = "123456";
+#define FW_VERSION "2.1.0-l3-ws"
 
 // Thời gian điều khiển
-const unsigned long UNLOCK_DURATION_MS     = 7000;  // Mở cửa 7 giây theo yêu cầu rồi tự đóng
-const unsigned long PIR_COOLDOWN_MS        = 10000; // Khoảng cách giữa 2 lần quét thử liên tiếp (10 giây)
-const unsigned long PIR_POST_UNLOCK_MS     = 15000; // Thời gian nghỉ sau khi mở cửa thành công (15 giây)
-const unsigned long PIR_ALERT_LOCKOUT_MS   = 30000; // Thời gian nghỉ sau khi cảnh báo kẻ lạ 5 lần (30 giây)
+const unsigned long DEFAULT_UNLOCK_MS      = 7000;  // Dùng khi command không ghi unlockMs
+const unsigned long MAX_UNLOCK_MS          = 15000; // Giới hạn cứng, không tin giá trị lớn hơn từ mạng
+const unsigned long PIR_COOLDOWN_MS        = 10000; // Khoảng cách giữa 2 lần quét thử liên tiếp
+const unsigned long PIR_POST_UNLOCK_MS     = 15000; // Thời gian nghỉ sau khi cửa khóa lại
+const unsigned long PIR_ALERT_LOCKOUT_MS   = 30000; // Thời gian nghỉ sau khi cảnh báo kẻ lạ 5 lần
 const unsigned long LOCKOUT_DURATION_MS    = 15000; // Khóa bàn phím 15 giây nếu nhập sai PIN 3 lần
+const unsigned long HEARTBEAT_MS           = 60000; // Trạng thái định kỳ để cloud phân biệt online/stale
+const unsigned long AWAIT_COMMAND_MS       = 15000; // Chờ command sau khi cloud chấp thuận
+const long          CLOCK_SKEW_S           = 5;     // Sai lệch đồng hồ chấp nhận khi kiểm TTL
+const uint32_t      FACE_HTTP_TIMEOUT_MS   = 15000;
+const uint32_t      PIN_HTTP_TIMEOUT_MS    = 15000; // Cloud quét BCrypt mọi hồ sơ (D04)
+const unsigned long API_KEEPALIVE_MS       = 60000;  // Giữ kết nối HTTPS ấm: GET /api/device/state mỗi phút khi rảnh
+const unsigned long API_MAX_IDLE_MS        = 120000; // Kết nối im lâu hơn thì bỏ, bắt tay lại (tránh socket chết do NAT)
 
 // ============================================================================
 // 2. ĐỊNH NGHĨA CHÂN CAMERA OV2640 (CỐ ĐỊNH TRÊN ESP32-S3 N16R8 CAM)
@@ -95,7 +114,7 @@ const unsigned long LOCKOUT_DURATION_MS    = 15000; // Khóa bàn phím 15 giây
 #define PCLK_GPIO_NUM     13
 
 // ============================================================================
-// 3. ĐỊNH NGHĨA CHÂN NGOẠI VI
+// 3. ĐỊNH NGHĨA CHÂN NGOẠI VI (chưa xác minh wiring thực tế - không tự đổi)
 // ============================================================================
 #define PIN_LED           19 // Chân nối bóng LED F5 5mm (trợ sáng và báo trạng thái)
 #define PIN_BUZZER        20 // Chân cực dương (+) của Chip Buzzer 5V
@@ -148,35 +167,55 @@ public:
 
 ESP32Keypad keypad = ESP32Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// Đối tượng Servo, MQTT & Web Server
+// Đối tượng Servo, WebSocket bảo mật và NVS
 Servo doorServo;
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-
-WebServer server(80);
+WebSocketsClient ws;
+Preferences prefs;
+bool wsStarted   = false; // begin() chỉ gọi một lần; thư viện tự kết nối lại
+bool wsConnected = false;
 bool cameraReady = false;
+bool caConfigured = false;
 
 // Biến trạng thái hệ thống
 String inputPinBuffer          = "";
 int failedPinAttempts          = 0;
-int consecutivePirFaceFails    = 0; // Đếm số lần quét mặt thất bại liên tiếp của PIR
-bool isDoorUnlocked            = false;
+int consecutivePirFaceFails    = 0; // Đếm số lần cloud từ chối khuôn mặt liên tiếp của PIR
+volatile bool isDoorUnlocked   = false;
+volatile bool relockPending    = false; // esp_timer đã khóa lại; loop phát tiếng bíp và sự kiện
 bool isSystemLockedOut         = false;
-bool isEmergencyLockdown       = false; // Chế độ vô hiệu hóa mở cửa từ Admin
+bool isEmergencyLockdown       = false; // Lưu NVS, áp dụng lại sau reboot
+bool bootEventSent             = false;
 unsigned long doorUnlockTime   = 0;
+unsigned long activeUnlockMs   = DEFAULT_UNLOCK_MS;
 unsigned long lockoutStartTime = 0;
 unsigned long lastPirTrigger   = 0;
-unsigned long lastMqttReconnect= 0;
+unsigned long lastHeartbeat    = 0;
+unsigned long awaitCommandUntil = 0;
+unsigned long previewUntil     = 0; // Cloud yêu cầu xem trước camera (chỉ hiển thị, không dùng để mở cửa)
+unsigned long lastPreviewFrame = 0;
+const unsigned long PREVIEW_INTERVAL_MS = 333; // ~3 khung hình/giây
+const unsigned long PREVIEW_MAX_MS      = 20000;
 unsigned long pirWarmupEnd     = 0;
 bool pirRequiresRelease        = false; // Bắt buộc cảm biến PIR phải hạ về LOW trước khi kích hoạt đợt quét mới
 
+// Chống phát lại: seq lớn nhất đã chấp nhận và ACK cuối, lưu NVS trước khi chấp hành
+uint64_t lastSeq   = 0;
+String lastCmdId   = "";
+String lastAckJson = "";
+String activeUnlockCommandId = "";
+
 static SemaphoreHandle_t camMutex = NULL;
+static esp_timer_handle_t relockTimer = NULL;
+static portMUX_TYPE doorMux = portMUX_INITIALIZER_UNLOCKED;
+
+enum class Decision { Granted, Denied, Throttled, Lockdown, Unavailable };
 
 // Khai báo trước các hàm xử lý
 void handleKeypadInput(char key);
-bool captureAndSendToBackend(const String& targetUrl, const String& eventType);
+Decision captureAndVerifyFace();
 bool sendSecurityAlertWithPhoto(const String& alertType, const String& description);
-bool verifyPinWithBackend(const String& pin);
+Decision verifyPinWithBackend(const String& pin);
+void publishStatus();
 
 // ============================================================================
 // HÀM PHÁT ÂM THANH TRÊN CHIP BUZZER 5V
@@ -191,161 +230,267 @@ void beep(int times, int onMs, int offMs = 80) {
 }
 
 // ============================================================================
-// HÀM MỞ KHÓA CỬA (SERVO 90 ĐỘ + RELAY + LED SÁNG + BUZZER)
+// TIỆN ÍCH: THỜI GIAN, ID NGẪU NHIÊN, JSON PHẲNG
 // ============================================================================
-void unlockDoor(const String& reason) {
-  if (isEmergencyLockdown) {
-    Serial.printf("\n[TỪ CHỐI MỞ CỬA] Cửa đang bị VÔ HIỆU HÓA KHẨN CẤP! Lý do yêu cầu: %s\n", reason.c_str());
-    beep(4, 100, 60);
-    return;
+bool timeSynced() { return time(nullptr) > 1700000000; }
+
+String randomId() {
+  char out[33];
+  for (int i = 0; i < 4; i++) snprintf(out + i * 8, 9, "%08lx", (unsigned long)esp_random());
+  return String(out);
+}
+
+// Command từ Core là JSON phẳng không escape (UUID, enum, số). Không dùng cho dữ liệu tùy ý.
+bool jsonString(const String& json, const char* key, String& out) {
+  String pattern = String("\"") + key + "\":\"";
+  int start = json.indexOf(pattern);
+  if (start < 0) return false;
+  start += pattern.length();
+  int end = json.indexOf('"', start);
+  if (end < 0 || end - start > 64) return false;
+  out = json.substring(start, end);
+  return true;
+}
+
+bool jsonUInt64(const String& json, const char* key, uint64_t& out) {
+  String pattern = String("\"") + key + "\":";
+  int start = json.indexOf(pattern);
+  if (start < 0) return false;
+  start += pattern.length();
+  uint64_t value = 0;
+  int i = start;
+  while (i < (int)json.length() && isDigit(json[i])) {
+    if (i - start >= 19) return false;
+    value = value * 10 + (uint64_t)(json[i] - '0');
+    i++;
   }
+  if (i == start) return false;
+  out = value;
+  return true;
+}
 
-  // Nếu cửa đã đang mở, chỉ cần gia hạn thêm 7 giây (tránh bị reset/đóng ngay do lệnh MQTT lặp)
-  if (isDoorUnlocked) {
-    Serial.printf("[MỞ CỬA] Cửa đang mở, gia hạn thêm 7 giây (%s)\n", reason.c_str());
-    doorUnlockTime = millis();
-    return;
-  }
-
-  Serial.printf("\n>>> [MỞ CỬA] Lý do: %s <<<\n", reason.c_str());
-  isDoorUnlocked = true;
-  doorUnlockTime = millis();
-  failedPinAttempts = 0;
-  consecutivePirFaceFails = 0;
-  pirRequiresRelease = true; // Yêu cầu cảm biến PIR phải nhả về LOW
-
-  digitalWrite(PIN_LED, HIGH); // Bật LED trong suốt thời gian mở cửa
-  digitalWrite(PIN_RELAY, RELAY_ON);
-  doorServo.write(SERVO_UNLOCK_ANGLE);
-  beep(2, 120, 80);
-
-  // ĐỒNG BỘ SỰ KIỆN MỞ CỬA LÊN MQTT BROKER
-  if (mqttClient.connected()) {
-    String method = "HARDWARE";
-    if (reason.indexOf("PIN") >= 0) method = "PIN";
-    else if (reason.indexOf("khuôn mặt") >= 0 || reason.indexOf("PIR") >= 0 || reason.indexOf("AI") >= 0) method = "FACE";
-    String evt = "DOOR_UNLOCKED:" + method;
-    mqttClient.publish(MQTT_TOPIC_PUB, evt.c_str());
-    Serial.printf("[MQTT PUB] Đã đồng bộ sự kiện: %s\n", evt.c_str());
-  }
-
-  // Khởi động đếm ngược 7 giây sau khi đã hoàn tất kích hoạt phần cứng & phát âm thanh
-  doorUnlockTime = millis();
+String u64ToString(uint64_t value) {
+  char buffer[21];
+  snprintf(buffer, sizeof(buffer), "%llu", (unsigned long long)value);
+  return String(buffer);
 }
 
 // ============================================================================
-// HÀM TỰ ĐỘNG ĐÓNG KHÓA CỬA (TẮT ĐÈN LED + RELAY OFF + SERVO 0 ĐỘ)
+// CHẤP HÀNH: MỞ KHÓA / KHÓA LẠI (timer khóa lại độc lập với HTTPS/WebSocket blocking)
 // ============================================================================
-void lockDoor() {
-  Serial.println(">>> [ĐÓNG CỬA] Hết thời gian mở (7 giây), tự động khóa lại cửa. <<<\n");
-  isDoorUnlocked = false;
+void actuateLocked() {
   doorServo.write(SERVO_LOCK_ANGLE);
   digitalWrite(PIN_RELAY, RELAY_OFF);
-  digitalWrite(PIN_LED, LOW); // Đảm bảo đèn LED tắt khi cửa đóng
-  beep(1, 150);
+  digitalWrite(PIN_LED, LOW);
+}
 
-  // Sau khi đóng cửa, nghỉ 15 giây và yêu cầu PIR nhả về LOW để không quét lại người vừa vào
-  lastPirTrigger = millis() + PIR_POST_UNLOCK_MS;
+// Chạy trong task esp_timer: chỉ điều khiển chấp hành, không gọi mạng hay delay.
+void relockTimerCallback(void* arg) {
+  bool wasUnlocked;
+  portENTER_CRITICAL(&doorMux);
+  wasUnlocked = isDoorUnlocked;
+  isDoorUnlocked = false;
+  if (wasUnlocked) relockPending = true;
+  portEXIT_CRITICAL(&doorMux);
+  if (wasUnlocked) actuateLocked();
+}
+
+// Trả về "" nếu đã điều khiển chấp hành, ngược lại là mã lý do từ chối.
+String executeUnlock(unsigned long unlockMs, const String& commandId) {
+  // Kiểm tra lockdown ngay trước khi chấp hành.
+  if (isEmergencyLockdown) {
+    Serial.println("[TỪ CHỐI MỞ CỬA] Cửa đang bị VÔ HIỆU HÓA KHẨN CẤP!");
+    beep(4, 100, 60);
+    return "LOCKDOWN";
+  }
+  // Không gia hạn timer khi cửa đang mở (contract: không gia hạn do lệnh trùng/lặp).
+  if (isDoorUnlocked) return "ALREADY_UNLOCKED";
+
+  Serial.printf("\n>>> [MỞ CỬA] Command %s, %lu ms <<<\n", commandId.c_str(), unlockMs);
+  portENTER_CRITICAL(&doorMux);
+  isDoorUnlocked = true;
+  portEXIT_CRITICAL(&doorMux);
+  doorUnlockTime = millis();
+  activeUnlockMs = unlockMs;
+  activeUnlockCommandId = commandId;
+  failedPinAttempts = 0;
+  consecutivePirFaceFails = 0;
+  awaitCommandUntil = 0;
   pirRequiresRelease = true;
+
+  digitalWrite(PIN_LED, HIGH);
+  digitalWrite(PIN_RELAY, RELAY_ON);
+  doorServo.write(SERVO_UNLOCK_ANGLE);
+  esp_timer_stop(relockTimer);
+  esp_timer_start_once(relockTimer, (uint64_t)unlockMs * 1000ULL);
+  beep(2, 120, 80);
+  return "";
+}
+
+// Khóa ngay (lockdown hoặc dự phòng khi timer chưa chạy).
+void lockNow() {
+  esp_timer_stop(relockTimer);
+  relockTimerCallback(nullptr);
 }
 
 // ============================================================================
-// GIAO DIỆN WEB SERVER CỔNG 80 (LIVE SNAPSHOT VIEW TRỰC TIẾP)
+// WEBSOCKET: ACK, SỰ KIỆN, TRẠNG THÁI (mọi bản tin có "kind"; Core lấy danh tính từ token lúc bắt tay)
 // ============================================================================
-void sendRootHtml(WebServer &srv) {
-  String html = "<!DOCTYPE html><html><head><meta charset='utf-8'>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<title>ESP32-S3 CAM Viewer</title>";
-  html += "<style>body{font-family:Arial,sans-serif;text-align:center;background:#0f172a;color:#f8fafc;padding:20px;}";
-  html += ".card{background:#1e293b;border-radius:12px;padding:20px;max-width:680px;margin:0 auto;box-shadow:0 4px 6px rgba(0,0,0,0.3);}";
-  html += "img{max-width:100%;width:640px;border:3px solid #38bdf8;border-radius:8px;margin:15px 0;background:#000;}";
-  html += "a.btn,button.btn{padding:10px 18px;margin:6px;font-size:14px;font-weight:600;border:none;border-radius:6px;cursor:pointer;text-decoration:none;display:inline-block;color:#fff;}";
-  html += ".btn-cap{background:#0284c7;}.btn-kiosk{background:#4f46e5;}</style></head><body>";
-  html += "<div class='card'>";
-  html += "<h2>Camera OV2640 - ESP32-S3 WROOM N16R8</h2>";
-  html += "<p id='status'>Trang thai: Dang truyen anh truc tiep</p>";
-  html += "<img id='liveImg' src='/capture' alt='Live View'><br>";
-  html += "<button class='btn btn-cap' onclick='fetchFrame()'>Chup 1 anh moi</button>";
-  html += "<a href='http://localhost:5173/kiosk' target='_blank' class='btn btn-kiosk'>Mo Web Kiosk</a>";
-  html += "<script>";
-  html += "var img = document.getElementById('liveImg');";
-  html += "function fetchFrame(){ img.src = '/capture?t=' + new Date().getTime(); }";
-  html += "setInterval(fetchFrame, 150);";
-  html += "</script></div></body></html>";
-
-  srv.sendHeader("Access-Control-Allow-Origin", "*");
-  srv.send(200, "text/html", html);
+bool wsSend(String& json) {
+  if (!wsConnected) return false;
+  return ws.sendTXT(json);
 }
 
-void handleStatus(WebServer &srv) {
-  char json[320];
-  snprintf(json, sizeof(json),
-    "{\"psram\":%s,\"free_psram\":%u,\"free_heap\":%u,\"wifi_rssi\":%d,\"ip\":\"%s\",\"unlocked\":%s,\"lockdown\":%s}",
-    psramFound() ? "true" : "false",
-    psramFound() ? ESP.getFreePsram() : 0,
-    ESP.getFreeHeap(),
-    WiFi.RSSI(),
-    WiFi.localIP().toString().c_str(),
-    isDoorUnlocked ? "true" : "false",
-    isEmergencyLockdown ? "true" : "false"
-  );
-  srv.sendHeader("Access-Control-Allow-Origin", "*");
-  srv.send(200, "application/json", json);
+void publishEvent(const char* type, const String& commandId = "") {
+  String json = String("{\"v\":1,\"kind\":\"event\",\"deviceId\":\"") + DEVICE_ID + "\",\"eventId\":\"" + randomId()
+              + "\",\"type\":\"" + type + "\",\"ts\":" + String((uint32_t)time(nullptr));
+  if (commandId.length() > 0) json += ",\"commandId\":\"" + commandId + "\"";
+  json += "}";
+  wsSend(json);
 }
 
-// Chụp ảnh JPEG trực tiếp từ Camera OV2640 (Hỗ trợ CORS đầy đủ cho Web Kiosk)
-void handleCaptureJpg(WebServer &srv) {
-  if (!cameraReady) {
-    srv.sendHeader("Access-Control-Allow-Origin", "*");
-    srv.send(500, "text/plain", "Camera not initialized");
+void publishStatus() {
+  String json = String("{\"v\":1,\"kind\":\"status\",\"deviceId\":\"") + DEVICE_ID + "\",\"lockdown\":"
+              + (isEmergencyLockdown ? "true" : "false") + ",\"unlocked\":" + (isDoorUnlocked ? "true" : "false")
+              + ",\"fw\":\"" FW_VERSION "\",\"rssi\":" + String(WiFi.RSSI()) + "}";
+  wsSend(json);
+  lastHeartbeat = millis();
+}
+
+String ackJson(const String& commandId, uint64_t seq, const char* ack, const char* reason) {
+  String json = String("{\"v\":1,\"kind\":\"ack\",\"deviceId\":\"") + DEVICE_ID + "\",\"commandId\":\"" + commandId
+              + "\",\"seq\":" + u64ToString(seq) + ",\"ack\":\"" + ack + "\",\"eventId\":\"" + randomId()
+              + "\",\"ts\":" + String((uint32_t)time(nullptr));
+  if (reason && reason[0]) json += String(",\"reason\":\"") + reason + "\"";
+  return json + "}";
+}
+
+void sendAck(const String& commandId, uint64_t seq, const char* ack, const char* reason = "") {
+  String json = ackJson(commandId, seq, ack, reason);
+  wsSend(json);
+  Serial.printf("[ACK] %s %s %s\n", commandId.c_str(), ack, reason ? reason : "");
+  // Chỉ lưu ACK cuối của command đã chấp nhận; ACK từ chối REPLAY/MALFORMED không được ghi đè.
+  if (strcmp(ack, "RECEIVED") != 0 && commandId == lastCmdId) {
+    lastAckJson = json;
+    prefs.putString("lastAck", lastAckJson);
+  }
+}
+
+// ============================================================================
+// XỬ LÝ COMMAND TỪ CLOUD (một đường thực thi duy nhất)
+// ============================================================================
+void handleCommand(const String& message) {
+  String type, deviceId, commandId;
+  uint64_t version = 0, seq = 0, issuedAt = 0, expiresAt = 0, unlockMs = DEFAULT_UNLOCK_MS;
+  jsonString(message, "commandId", commandId);
+  if (!jsonUInt64(message, "v", version) || version != 1 || !jsonString(message, "type", type)
+      || !jsonString(message, "deviceId", deviceId) || deviceId != DEVICE_ID || commandId.length() == 0
+      || !jsonUInt64(message, "seq", seq) || seq == 0
+      || !jsonUInt64(message, "issuedAt", issuedAt) || !jsonUInt64(message, "expiresAt", expiresAt)) {
+    Serial.println("[CMD] Bỏ qua command sai định dạng.");
+    if (commandId.length() > 0) sendAck(commandId, seq, "REJECTED", "MALFORMED");
     return;
   }
+  jsonUInt64(message, "unlockMs", unlockMs);
 
-  if (camMutex && xSemaphoreTake(camMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (fb) esp_camera_fb_return(fb); // Xả khung hình cũ
+  // Trùng commandId: chỉ gửi lại ACK cũ, không chấp hành lại, không gia hạn.
+  if (commandId == lastCmdId) {
+    Serial.println("[CMD] Command trùng, gửi lại ACK cũ.");
+    if (lastAckJson.length() > 0) wsSend(lastAckJson);
+    return;
+  }
+  if (seq <= lastSeq) {
+    sendAck(commandId, seq, "REJECTED", "REPLAY");
+    return;
+  }
+  // Lưu trước khi chấp hành: reboot giữa chừng không được chạy lại command này.
+  lastSeq = seq;
+  lastCmdId = commandId;
+  lastAckJson = "";
+  prefs.putULong64("lastSeq", lastSeq);
+  prefs.putString("lastCmd", lastCmdId);
+  prefs.putString("lastAck", "");
+  sendAck(commandId, seq, "RECEIVED");
 
-    fb = esp_camera_fb_get(); // Lấy khung hình mới nhất
+  if (!timeSynced()) { sendAck(commandId, seq, "REJECTED", "TIME_UNSYNCED"); return; }
+  uint64_t now = (uint64_t)time(nullptr);
+  if (now > expiresAt + CLOCK_SKEW_S) { sendAck(commandId, seq, "REJECTED", "EXPIRED"); return; }
+  if (issuedAt > now + 30) { sendAck(commandId, seq, "REJECTED", "CLOCK_SKEW"); return; }
 
-    if (!fb) {
-      xSemaphoreGive(camMutex);
-      srv.sendHeader("Access-Control-Allow-Origin", "*");
-      srv.send(500, "text/plain", "Camera capture failed");
-      return;
-    }
-
-    srv.sendHeader("Access-Control-Allow-Origin", "*");
-    srv.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    srv.sendHeader("Access-Control-Allow-Headers", "*");
-    srv.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    srv.sendHeader("Pragma", "no-cache");
-    srv.sendHeader("Expires", "0");
-    srv.setContentLength(fb->len);
-    srv.send(200, "image/jpeg", "");
-    WiFiClient client = srv.client();
-    client.write(fb->buf, fb->len);
-    esp_camera_fb_return(fb);
-    xSemaphoreGive(camMutex);
+  if (type == "UNLOCK") {
+    unsigned long ms = (unsigned long)unlockMs;
+    if (ms < 1000) ms = 1000;
+    if (ms > MAX_UNLOCK_MS) ms = MAX_UNLOCK_MS;
+    String reason = executeUnlock(ms, commandId);
+    // EXECUTED = đã điều khiển relay/servo, không phải cảm biến xác nhận cửa đã mở.
+    if (reason.length() == 0) sendAck(commandId, seq, "EXECUTED");
+    else sendAck(commandId, seq, "REJECTED", reason.c_str());
+  } else if (type == "LOCKDOWN_ON" || type == "LOCKDOWN_OFF") {
+    isEmergencyLockdown = (type == "LOCKDOWN_ON");
+    prefs.putBool("lockdown", isEmergencyLockdown);
+    if (isEmergencyLockdown) lockNow();
+    sendAck(commandId, seq, "EXECUTED");
+    Serial.println(isEmergencyLockdown ? "!!! [KHẨN CẤP] ĐÃ BẬT VÔ HIỆU HÓA CỬA !!!"
+                                       : ">>> [KHẨN CẤP] ĐÃ TẮT VÔ HIỆU HÓA CỬA <<<");
+    if (isEmergencyLockdown) beep(5, 120, 80); else beep(2, 200, 100);
+    publishStatus();
   } else {
-    srv.sendHeader("Access-Control-Allow-Origin", "*");
-    srv.send(503, "text/plain", "Camera busy");
+    sendAck(commandId, seq, "REJECTED", "UNKNOWN_TYPE");
   }
 }
 
-void handleOptions(WebServer &srv) {
-  srv.sendHeader("Access-Control-Allow-Origin", "*");
-  srv.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  srv.sendHeader("Access-Control-Allow-Headers", "*");
-  srv.send(200, "text/plain", "OK");
+void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      // Socket mở = online với Core; báo ngay lockdown hiện tại để Core đồng bộ lại nếu lệch.
+      wsConnected = true;
+      Serial.println("[WS] Đã kết nối wss tới cloud.");
+      publishStatus();
+      if (!bootEventSent) { publishEvent("BOOT"); bootEventSent = true; }
+      break;
+    case WStype_DISCONNECTED:
+      if (wsConnected) Serial.println("[WS] Mất kết nối cloud; thư viện sẽ tự kết nối lại.");
+      wsConnected = false;
+      break;
+    case WStype_TEXT: {
+      if (length > 700) return;
+      String message;
+      message.reserve(length);
+      for (size_t i = 0; i < length; i++) message += (char)payload[i];
+      String kind;
+      // Chỉ bản tin "cmd" từ Core mới được xử lý như lệnh.
+      if (jsonString(message, "kind", kind) && kind == "cmd") handleCommand(message);
+      // "preview": admin đang xem camera; chỉ gửi khung hình, không chấp hành gì.
+      else if (kind == "preview") {
+        uint64_t ms = 0;
+        jsonUInt64(message, "ms", ms);
+        if (ms > PREVIEW_MAX_MS) ms = PREVIEW_MAX_MS;
+        previewUntil = millis() + (unsigned long)ms;
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
-void handleRoot80() { sendRootHtml(server); }
-void handleCapture80() { handleCaptureJpg(server); }
-void handleStatus80() { handleStatus(server); }
-void handleOptions80() { handleOptions(server); }
+// TLS cần CA và đồng hồ đúng để kiểm chứng chứng chỉ; chưa đủ điều kiện thì chưa kết nối.
+// Thư viện chỉ setInsecure() khi không có CA, nên tuyệt đối không gọi begin khi thiếu CA.
+void startWebSocket() {
+  if (wsStarted || !caConfigured || !timeSynced() || strlen(DEVICE_TOKEN) == 0) return;
+  // Thay header mặc định "Origin: file://" bằng danh tính thiết bị (không log ra Serial).
+  static String headers = String("Authorization: Bearer ") + DEVICE_TOKEN + "\r\nX-Device-Id: " + DEVICE_ID;
+  ws.setExtraHeaders(headers.c_str());
+  ws.onEvent(wsEvent);
+  ws.setReconnectInterval(5000);
+  ws.enableHeartbeat(15000, 5000, 2); // ping 15s; 2 lần không có pong thì đóng và kết nối lại
+  ws.beginSslWithCA(CLOUD_HOST, CLOUD_PORT, WS_PATH, ROOT_CA_PEM, "");
+  wsStarted = true;
+  Serial.println("[WS] Bắt đầu kết nối wss://" CLOUD_HOST WS_PATH);
+}
 
 // ============================================================================
-// HÀM KHỞI TẠO CAMERA OV2640 (CẤU HÌNH ĐÃ TEST THÀNH CÔNG 100%)
+// HÀM KHỞI TẠO CAMERA OV2640 (CẤU HÌNH ĐÃ TEST THÀNH CÔNG)
 // ============================================================================
 bool setupCamera() {
   Serial.println("\n[CAMERA] Đang kiểm tra bộ nhớ và khởi tạo Camera...");
@@ -356,7 +501,7 @@ bool setupCamera() {
     Serial.println(" -> Hãy vào Arduino IDE: Tools -> PSRAM -> chọn 'OPI PSRAM'!");
     Serial.println("************************************************************");
   } else {
-    Serial.printf(" [PSRAM OK] Đã nhận diện OPI PSRAM! Dung lượng trống: %d bytes\n", ESP.getFreePsram());
+    Serial.printf(" [PSRAM OK] Đã nhận diện OPI PSRAM! Dung lượng trống: %u bytes\n", (unsigned)ESP.getFreePsram());
   }
 
   camera_config_t config = {};
@@ -414,7 +559,7 @@ bool setupCamera() {
 
   cameraReady = true;
   Serial.println("[CAMERA OK] Khởi tạo Camera OV2640 thành công!");
-  
+
   camera_fb_t *fb = esp_camera_fb_get();
   if (fb) esp_camera_fb_return(fb);
 
@@ -422,251 +567,247 @@ bool setupCamera() {
 }
 
 // ============================================================================
-// HÀM KẾT NỐI WI-FI (TỐI ƯU CÔNG SUẤT SÓNG & TỰ ĐỘNG KẾT NỐI LẠI)
+// HÀM KẾT NỐI WI-FI VÀ ĐỒNG BỘ THỜI GIAN (NTP cần cho TLS và TTL command)
 // ============================================================================
+struct WifiNetwork { const char* ssid; const char* password; };
+const WifiNetwork WIFI_NETWORKS[] = { {WIFI_SSID, WIFI_PASSWORD}, {WIFI_SSID_2, WIFI_PASSWORD_2} };
+int wifiIndex = 0;
+
+int wifiNetworkCount() { return strlen(WIFI_SSID_2) > 0 ? 2 : 1; }
+
+// Không in mật khẩu, chỉ in tên mạng.
+void beginWifi(int index) {
+  wifiIndex = index % wifiNetworkCount();
+  Serial.printf("[WIFI] Đang kết nối tới: %s ...\n", WIFI_NETWORKS[wifiIndex].ssid);
+  // Dừng lần kết nối đang dở trước khi đổi mạng; nếu không ESP-IDF báo
+  // "sta is connecting, cannot set config" và vẫn kẹt ở mạng cũ.
+  WiFi.disconnect(false, false);
+  delay(100);
+  WiFi.begin(WIFI_NETWORKS[wifiIndex].ssid, WIFI_NETWORKS[wifiIndex].password);
+}
+
 void connectWiFi() {
-  Serial.printf("\n[WIFI] Đang kết nối tới: %s (Mật khẩu: %s)...", wifi_ssid, wifi_password);
-  
   WiFi.persistent(false);
   WiFi.disconnect(true);
   delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false); // Tắt sleep để module RF giữ công suất tối đa
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(wifi_ssid, wifi_password);
+  // loop() tự xoay vòng mạng; auto-reconnect của thư viện sẽ bám mạng cũ và tranh với việc đổi mạng.
+  WiFi.setAutoReconnect(false);
 
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 40) {
-    delay(500);
-    Serial.print(".");
-    retry++;
+  // Lúc khởi động: thử lần lượt từng mạng, mỗi mạng tối đa 10 giây.
+  for (int n = 0; n < wifiNetworkCount() && WiFi.status() != WL_CONNECTED; n++) {
+    beginWifi(n);
+    for (int retry = 0; retry < 20 && WiFi.status() != WL_CONNECTED; retry++) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\n[WIFI OK] Đã kết nối thành công! IP ESP32-S3: %s (RSSI: %d dBm)\n",
+    Serial.printf("[WIFI OK] Mạng: %s, IP ESP32-S3: %s (RSSI: %d dBm)\n", WIFI_NETWORKS[wifiIndex].ssid,
                   WiFi.localIP().toString().c_str(), WiFi.RSSI());
     beep(2, 80);
   } else {
-    Serial.printf("\n[WIFI CHƯA KẾT NỐI] Mã trạng thái: %d. Hệ thống sẽ tự động thử lại trong nền...\n", WiFi.status());
-    Serial.println("[HỆ THỐNG] Bạn vẫn có thể nhập mã PIN trên Keypad 4x4 bình thường.");
+    Serial.printf("[WIFI CHƯA KẾT NỐI] Mã trạng thái: %d. Sẽ thử lại trong nền; không mở khóa khi offline.\n", WiFi.status());
   }
 }
 
-// ============================================================================
-// HÀM CHỤP VÀ GỬI ẢNH LÊN BACKEND XÁC THỰC KHUÔN MẶT
-// ============================================================================
-bool captureAndSendToBackend(const String& targetUrl, const String& eventType) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] Chưa kết nối, hủy gửi ảnh sang AI.");
-    return false;
-  }
+void syncClock(unsigned long waitMs) {
+  configTime(0, 0, NTP_SERVER, "time.google.com");
+  unsigned long start = millis();
+  while (!timeSynced() && millis() - start < waitMs) delay(200);
+  Serial.println(timeSynced() ? "[NTP] Đã đồng bộ thời gian." : "[NTP] Chưa đồng bộ thời gian; tạm ngừng TLS.");
+}
 
+// ============================================================================
+// REST QUA HTTPS TỚI CLOUD CORE (Bearer token thiết bị + request ID dùng một lần)
+// ============================================================================
+String apiUrl(const String& path) {
+  return String("https://") + CLOUD_HOST + (CLOUD_PORT == 443 ? String("") : ":" + String(CLOUD_PORT)) + path;
+}
+
+// Một kết nối HTTPS giữ sống (keep-alive) cho mọi request REST: bỏ bắt tay TCP + TLS ở mỗi lần quét.
+// Vẫn kiểm chứng CA/hostname như cũ; chỉ dùng lại kết nối đã được kiểm chứng tới đúng CLOUD_HOST.
+WiFiClientSecure apiTls;
+HTTPClient apiHttp;
+bool apiReady = false;
+unsigned long lastApiUse = 0;
+
+// Lỗi xảy ra trước khi có phản hồi trên kết nối dùng lại = socket đã chết; gửi lại an toàn.
+bool staleConnectionError(int code) {
+  return code == HTTPC_ERROR_SEND_HEADER_FAILED || code == HTTPC_ERROR_SEND_PAYLOAD_FAILED
+      || code == HTTPC_ERROR_NOT_CONNECTED || code == HTTPC_ERROR_CONNECTION_LOST;
+}
+
+int apiSend(const String& path, const String& contentType, uint8_t* body, size_t length, uint32_t timeoutMs,
+            const String& requestId, String& response) {
+  response = "";
+  if (!apiHttp.begin(apiTls, apiUrl(path))) return -1;
+  apiHttp.setConnectTimeout(5000);
+  apiHttp.setTimeout(timeoutMs);
+  apiHttp.addHeader("Authorization", String("Bearer ") + DEVICE_TOKEN);
+  apiHttp.addHeader("X-Device-Id", DEVICE_ID);
+  if (requestId.length() > 0) {
+    apiHttp.addHeader("X-Request-Id", requestId);
+    apiHttp.addHeader("X-Request-Time", String((uint32_t)time(nullptr)));
+  }
+  int code;
+  if (body) {
+    apiHttp.addHeader("Content-Type", contentType);
+    code = apiHttp.POST(body, length);
+  } else {
+    code = apiHttp.GET();
+  }
+  if (code > 0) response = apiHttp.getString(); // Đọc hết phản hồi thì kết nối mới dùng lại được
+  apiHttp.end();                                 // setReuse(true): giữ socket nếu server cho keep-alive
+  return code;
+}
+
+// body == NULL: GET. requestId rỗng: không gửi X-Request-Id (chỉ dùng cho GET /api/device/state).
+int deviceRequest(const String& path, const String& contentType, uint8_t* body, size_t length,
+                  uint32_t timeoutMs, String& response, bool singleUse = true) {
+  response = "";
+  if (WiFi.status() != WL_CONNECTED || !caConfigured || !timeSynced() || strlen(DEVICE_TOKEN) == 0) return -1;
+  if (!apiReady) {
+    apiTls.setCACert(ROOT_CA_PEM); // Kiểm chứng CA và hostname; không dùng setInsecure()
+    apiHttp.setReuse(true);
+    apiReady = true;
+  }
+  if (apiTls.connected() && millis() - lastApiUse > API_MAX_IDLE_MS) apiTls.stop();
+  bool reused = apiTls.connected();
+  // Lần gửi lại dùng CÙNG X-Request-Id: nếu lần đầu đã tới server thì Core trả 409, không mở cửa hai lần.
+  String requestId = singleUse ? randomId() : String("");
+  unsigned long started = millis();
+  int code = apiSend(path, contentType, body, length, timeoutMs, requestId, response);
+  if (reused && staleConnectionError(code)) {
+    Serial.println("[HTTPS] Kết nối giữ sống đã đóng, kết nối lại...");
+    apiTls.stop();
+    reused = false;
+    code = apiSend(path, contentType, body, length, timeoutMs, requestId, response);
+  }
+  if (code > 0) lastApiUse = millis(); else apiTls.stop();
+  Serial.printf("[HTTPS] %s %d sau %lu ms (%s)\n", path.c_str(), code, millis() - started,
+                reused ? "dùng lại kết nối" : "kết nối mới");
+  return code;
+}
+
+// Giữ kết nối HTTPS ấm khi rảnh để lần quét kế tiếp không phải bắt tay TLS lại.
+void keepApiWarm() {
+  if (millis() - lastApiUse < API_KEEPALIVE_MS) return;
+  String response;
+  deviceRequest("/api/device/state", "", NULL, 0, 5000, response, false);
+  if (lastApiUse == 0 || millis() - lastApiUse >= API_KEEPALIVE_MS) lastApiUse = millis(); // Lỗi: đợi chu kỳ sau
+}
+
+Decision decisionFrom(int code, const String& response) {
+  if ((code == 200 || code == 202) && response.indexOf("\"decision\":\"GRANTED\"") >= 0) return Decision::Granted;
+  if (code == 401 || code == 422) return Decision::Denied;
+  if (code == 429) return Decision::Throttled;
+  if (code == 403) return Decision::Lockdown;
+  return Decision::Unavailable; // Mạng/cloud/AI lỗi: không mở và không tính là kẻ lạ
+}
+
+// Gửi một khung JPEG xem trước qua WebSocket (nhị phân). Bỏ qua nếu camera đang bận chụp xác thực.
+void sendPreviewFrame() {
+  if (!cameraReady || !camMutex || xSemaphoreTake(camMutex, 0) != pdTRUE) return;
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (fb) {
+    if (fb->len <= 100 * 1024) ws.sendBIN(fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+  }
+  xSemaphoreGive(camMutex);
+}
+
+// Chụp một khung JPEG mới và gửi multipart kèm các trường văn bản (đã kiểm soát nội dung).
+int postPhoto(const String& path, const String& fields, uint32_t timeoutMs, String& response) {
+  if (!cameraReady) return -1;
   camera_fb_t *fb = NULL;
-  if (camMutex && xSemaphoreTake(camMutex, pdMS_TO_TICKS(1200)) == pdTRUE) {
+  if (camMutex && xSemaphoreTake(camMutex, pdMS_TO_TICKS(1500)) == pdTRUE) {
     fb = esp_camera_fb_get();
-    if (fb) esp_camera_fb_return(fb);
+    if (fb) esp_camera_fb_return(fb); // Xả khung hình cũ
     fb = esp_camera_fb_get();
     if (!fb) {
       xSemaphoreGive(camMutex);
       Serial.println("[CAMERA] Lỗi: Không thu nhận được khung hình!");
-      return false;
+      return -1;
     }
   } else {
-    Serial.println("[CAMERA] Đang bận, không thể chụp ảnh AI!");
-    return false;
+    Serial.println("[CAMERA] Đang bận!");
+    return -1;
   }
 
-  HTTPClient http;
-  http.begin(targetUrl);
-  http.setTimeout(12000);
-
-  String boundary = "----ESP32S3SmartLockBoundary";
-  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-  String head = "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"file\"; filename=\"face.jpg\"\r\n";
+  String boundary = "----ESP32S3SmartLock" + randomId();
+  String head = fields;
+  head.replace("{B}", boundary);
+  head += "--" + boundary + "\r\n";
+  head += "Content-Disposition: form-data; name=\"file\"; filename=\"door.jpg\"\r\n";
   head += "Content-Type: image/jpeg\r\n\r\n";
   String tail = "\r\n--" + boundary + "--\r\n";
 
   size_t totalLen = head.length() + fb->len + tail.length();
-  uint8_t *payload = (uint8_t *)malloc(totalLen);
+  uint8_t *payload = (uint8_t *)ps_malloc(totalLen);
+  if (!payload) payload = (uint8_t *)malloc(totalLen);
   if (!payload) {
-    Serial.println("[MEM] Không đủ bộ nhớ RAM để gửi ảnh!");
+    Serial.println("[MEM] Không đủ bộ nhớ để gửi ảnh!");
     esp_camera_fb_return(fb);
-    if (camMutex) xSemaphoreGive(camMutex);
-    http.end();
-    return false;
+    xSemaphoreGive(camMutex);
+    return -1;
   }
-
   memcpy(payload, head.c_str(), head.length());
   memcpy(payload + head.length(), fb->buf, fb->len);
   memcpy(payload + head.length() + fb->len, tail.c_str(), tail.length());
   esp_camera_fb_return(fb);
-  if (camMutex) xSemaphoreGive(camMutex);
+  xSemaphoreGive(camMutex);
 
-  Serial.printf("[HTTP] Đang gửi ảnh (%u bytes) tới Backend: %s ...\n", totalLen, targetUrl.c_str());
-  int httpCode = http.POST(payload, totalLen);
+  Serial.printf("[HTTPS] Gửi ảnh (%u bytes) tới %s ...\n", (unsigned)totalLen, path.c_str());
+  int code = deviceRequest(path, "multipart/form-data; boundary=" + boundary, payload, totalLen, timeoutMs, response);
   free(payload);
-
-  bool authorized = false;
-  if (httpCode == 200) {
-    String response = http.getString();
-    Serial.printf("[HTTP 200] Kết quả Backend: %s\n", response.c_str());
-
-    if (response.indexOf("\"status\":\"success\"") >= 0 ||
-        response.indexOf("FACE_VERIFIED") >= 0 ||
-        response.indexOf("\"match\":true") >= 0 ||
-        response.indexOf("UNLOCK") >= 0) {
-      authorized = true;
-    }
-  } else {
-    Serial.printf("[HTTP LỖI] Mã phản hồi: %d, Chi tiết: %s\n", httpCode, http.getString().c_str());
-  }
-
-  http.end();
-  return authorized;
+  return code;
 }
 
-// ============================================================================
-// HÀM CHỤP ẢNH KẺ LẠ VÀ GỬI CẢNH BÁO AN NINH VỀ CHO ADMIN
-// ============================================================================
+Decision captureAndVerifyFace() {
+  String response;
+  unsigned long started = millis();
+  int code = postPhoto("/api/device/face", "", FACE_HTTP_TIMEOUT_MS, response);
+  Serial.printf("[HTTPS] Kết quả khuôn mặt: %d %s\n", code, response.c_str());
+  Serial.printf("[THỜI GIAN] Chụp + gửi + AI cloud: %lu ms\n", millis() - started);
+  return decisionFrom(code, response);
+}
+
 bool sendSecurityAlertWithPhoto(const String& alertType, const String& description) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[ALERT] Wi-Fi chưa kết nối, không thể gửi ảnh cảnh báo.");
-    return false;
-  }
-
-  camera_fb_t *fb = NULL;
-  if (camMutex && xSemaphoreTake(camMutex, pdMS_TO_TICKS(1500)) == pdTRUE) {
-    fb = esp_camera_fb_get();
-    if (fb) esp_camera_fb_return(fb);
-    fb = esp_camera_fb_get();
-    if (!fb) {
-      xSemaphoreGive(camMutex);
-      Serial.println("[ALERT] Lỗi lấy khung hình camera!");
-      return false;
-    }
-  } else {
-    Serial.println("[ALERT] Camera đang bận!");
-    return false;
-  }
-
-  HTTPClient http;
-  http.begin(backendAlertUrl);
-  http.setTimeout(10000);
-
-  String boundary = "----ESP32AlertBoundary" + String(millis());
-  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-  String head = "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"alertType\"\r\n\r\n";
-  head += alertType + "\r\n";
-
-  head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"description\"\r\n\r\n";
-  head += description + "\r\n";
-
-  head += "--" + boundary + "\r\n";
-  head += "Content-Disposition: form-data; name=\"file\"; filename=\"intruder.jpg\"\r\n";
-  head += "Content-Type: image/jpeg\r\n\r\n";
-
-  String tail = "\r\n--" + boundary + "--\r\n";
-
-  size_t totalLen = head.length() + fb->len + tail.length();
-  uint8_t *payload = (uint8_t *)malloc(totalLen);
-  if (!payload) {
-    Serial.println("[ALERT] Không đủ RAM tạo payload ảnh cảnh báo!");
-    esp_camera_fb_return(fb);
-    if (camMutex) xSemaphoreGive(camMutex);
-    http.end();
-    return false;
-  }
-
-  memcpy(payload, head.c_str(), head.length());
-  memcpy(payload + head.length(), fb->buf, fb->len);
-  memcpy(payload + head.length() + fb->len, tail.c_str(), tail.length());
-
-  esp_camera_fb_return(fb);
-  if (camMutex) xSemaphoreGive(camMutex);
-
-  Serial.printf("[ALERT] Đang gửi ảnh cảnh báo kẻ lạ (%u bytes) tới Server: %s ...\n", totalLen, backendAlertUrl.c_str());
-  int code = http.POST(payload, totalLen);
-  free(payload);
-
+  String fields = "--{B}\r\nContent-Disposition: form-data; name=\"alertType\"\r\n\r\n" + alertType + "\r\n"
+                + "--{B}\r\nContent-Disposition: form-data; name=\"description\"\r\n\r\n" + description + "\r\n";
+  String response;
+  int code = postPhoto("/api/device/alerts", fields, 10000, response);
   bool ok = (code == 200 || code == 201);
-  if (ok) {
-    Serial.printf("[ALERT OK] Đã gửi cảnh báo kẻ lạ thành công (HTTP %d)!\n", code);
-  } else {
-    Serial.printf("[ALERT LỖI] Gửi ảnh thất bại! Mã: %d, Chi tiết: %s\n", code, http.getString().c_str());
-  }
-
-  http.end();
+  Serial.printf(ok ? "[ALERT OK] Đã gửi cảnh báo (HTTP %d)\n" : "[ALERT LỖI] Gửi cảnh báo thất bại (mã %d)\n", code);
   return ok;
 }
 
-// ============================================================================
-// HÀM XÁC THỰC MÃ PIN VỚI BACKEND CORE (HỖ TRỢ OFFLINE MASTER_PIN)
-// ============================================================================
-bool verifyPinWithBackend(const String& pin) {
-  if (WiFi.status() != WL_CONNECTED) {
-    return (pin == MASTER_PIN);
-  }
-
-  HTTPClient http;
-  http.begin(backendPinUrl);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(4000);
-
+// D04: PIN không kèm username; không có master PIN hay đường mở offline.
+Decision verifyPinWithBackend(const String& pin) {
   String json = "{\"pinCode\":\"" + pin + "\"}";
-  int code = http.POST(json);
-  bool authorized = false;
-
-  if (code == 200) {
-    String resp = http.getString();
-    if (resp.indexOf("\"status\":\"success\"") >= 0) {
-      authorized = true;
-    }
-  } else if (code < 0) {
-    // Nếu rớt mạng backend -> kiểm tra MASTER_PIN offline
-    authorized = (pin == MASTER_PIN);
-  }
-
-  http.end();
-  return authorized;
+  String response;
+  int code = deviceRequest("/api/device/pin", "application/json", (uint8_t*)json.c_str(), json.length(),
+                           PIN_HTTP_TIMEOUT_MS, response);
+  Serial.printf("[HTTPS] Kết quả PIN: %d\n", code); // Không in PIN
+  return decisionFrom(code, response);
 }
 
-// ============================================================================
-// HÀM XỬ LÝ LỆNH TỪ MQTT BROKER
-// ============================================================================
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String message;
-  for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
-  Serial.printf("[MQTT] Nhận lệnh [%s]: %s\n", topic, message.c_str());
-
-  if (message == "OPEN_DOOR" || message == "UNLOCK") {
-    unlockDoor("Lệnh mở cửa từ Web Dashboard / Kiosk qua MQTT");
-  } else if (message == "EMERGENCY_LOCKDOWN_ON" || message == "LOCKDOWN_ON") {
-    isEmergencyLockdown = true;
-    Serial.println("!!! [KHẨN CẤP] ADMIN ĐÃ BẬT VÔ HIỆU HÓA CỬA !!!");
-    beep(5, 120, 80);
-  } else if (message == "EMERGENCY_LOCKDOWN_OFF" || message == "LOCKDOWN_OFF") {
-    isEmergencyLockdown = false;
-    Serial.println(">>> [KHẨN CẤP] ADMIN ĐÃ TẮT VÔ HIỆU HÓA CỬA. HOẠT ĐỘNG BÌNH THƯỜNG. <<<");
-    beep(2, 200, 100);
-  }
+// Cloud đã chấp thuận: cửa chỉ mở khi command WebSocket tới; đèn báo đang chờ.
+void onGranted() {
+  Serial.println("[CLOUD] Đã chấp thuận, chờ command mở khóa qua WebSocket...");
+  awaitCommandUntil = millis() + AWAIT_COMMAND_MS;
+  digitalWrite(PIN_LED, HIGH);
+  beep(1, 60);
 }
 
-void reconnectMqtt() {
-  if (!mqttClient.connected() && (millis() - lastMqttReconnect > 5000)) {
-    lastMqttReconnect = millis();
-    Serial.print("[MQTT] Đang kết nối tới Broker...");
-    if (mqttClient.connect("ESP32S3_SmartLock")) {
-      Serial.println(" Thành công!");
-      mqttClient.subscribe(MQTT_TOPIC_SUB);
-    } else {
-      Serial.printf(" Thất bại, mã lỗi=%d\n", mqttClient.state());
-    }
-  }
+void onCloudError() {
+  Serial.println("[CLOUD] Không xác thực được (mạng/cloud lỗi). Cửa giữ nguyên khóa.");
+  digitalWrite(PIN_LED, LOW);
+  beep(5, 40, 40);
 }
 
 // ============================================================================
@@ -674,7 +815,6 @@ void reconnectMqtt() {
 // ============================================================================
 void handleKeypadInput(char key) {
   beep(1, 25); // Tiếng bíp ngắn 25ms êm tai và không chặn CPU quá lâu gây tràn buffer Camera
-  Serial.printf("[KEYPAD] Phím vừa nhấn: '%c'\n", key);
 
   if (key == '*' || key == 'C') {
     inputPinBuffer = "";
@@ -686,22 +826,26 @@ void handleKeypadInput(char key) {
     return; // Bỏ qua phím phụ
   }
 
-  // Phím 'D' = Chuông cửa & Quét khuôn mặt AI
+  // Phím 'D' = Chuông cửa & Quét khuôn mặt AI trên cloud
   if (key == 'D') {
     if (isEmergencyLockdown) {
       Serial.println("[CHUÔNG CỬA] Cửa đang bị vô hiệu hóa khẩn cấp!");
       beep(3, 80, 50);
       return;
     }
-    Serial.println("[CHUÔNG CỬA] Bấm phím 'D' -> Bật LED và quét khuôn mặt AI...");
+    if (isDoorUnlocked) return; // Cửa đang mở, không gửi thêm yêu cầu
+    Serial.println("[CHUÔNG CỬA] Bấm phím 'D' -> Bật LED và gửi ảnh lên cloud...");
     digitalWrite(PIN_LED, HIGH); // Bật LED trợ sáng
     beep(2, 100, 60);
 
-    if (captureAndSendToBackend(backendVerifyUrl, "DOORBELL_FACE_SCAN")) {
+    Decision decision = captureAndVerifyFace();
+    if (decision == Decision::Granted) {
       consecutivePirFaceFails = 0;
-      unlockDoor("Xác thực khuôn mặt AI thành công (Bấm chuông 'D')");
+      onGranted();
+    } else if (decision == Decision::Unavailable) {
+      onCloudError();
     } else {
-      Serial.println("[AI] Không khớp người quen. Tắt LED.");
+      Serial.println("[AI] Không được chấp thuận. Tắt LED.");
       digitalWrite(PIN_LED, LOW);
       beep(3, 80, 60);
     }
@@ -718,43 +862,44 @@ void handleKeypadInput(char key) {
     }
 
     if (inputPinBuffer.length() == 0) {
-      Serial.println("[KEYPAD] Chưa có số nào được nhập! Vui lòng bấm dãy số (ví dụ: 123456) rồi mới bấm '#'.");
+      Serial.println("[KEYPAD] Chưa có số nào được nhập.");
       beep(2, 60, 40);
       return;
     }
 
-    Serial.printf("[KEYPAD] Kiểm tra mã PIN (%d ký tự)...\n", inputPinBuffer.length());
+    Serial.printf("[KEYPAD] Gửi PIN (%d ký tự) lên cloud...\n", inputPinBuffer.length());
     String pinToCheck = inputPinBuffer;
     inputPinBuffer = "";
 
-    if (verifyPinWithBackend(pinToCheck)) {
+    Decision decision = verifyPinWithBackend(pinToCheck);
+    if (decision == Decision::Granted) {
       failedPinAttempts = 0;
-      unlockDoor("Nhập đúng mã PIN trên Keypad 4x4");
+      onGranted();
+    } else if (decision == Decision::Unavailable) {
+      onCloudError(); // Không tính là sai PIN khi mạng/cloud lỗi
     } else {
       failedPinAttempts++;
-      Serial.printf("[CẢNH BÁO] Sai mã PIN lần %d/3!\n", failedPinAttempts);
+      Serial.printf("[CẢNH BÁO] PIN bị từ chối lần %d/3!\n", failedPinAttempts);
       beep(3, 180, 100);
 
-      if (failedPinAttempts >= 3) {
-        Serial.println("!!! [BÁO ĐỘNG] Sai PIN 3 lần liên tiếp! Báo động còi, chụp ảnh kẻ lạ gửi Admin & Khóa 15s !!!");
+      if (failedPinAttempts >= 3 || decision == Decision::Throttled) {
+        Serial.println("!!! [BÁO ĐỘNG] Sai PIN nhiều lần! Báo động, chụp ảnh gửi Admin & khóa bàn phím 15s !!!");
         isSystemLockedOut = true;
         lockoutStartTime = millis();
         beep(8, 250, 100);
-        if (mqttClient.connected()) {
-          mqttClient.publish(MQTT_TOPIC_PUB, "INTRUDER_WRONG_PIN_3_TIMES");
-        }
-        sendSecurityAlertWithPhoto("WRONG_PIN_3_TIMES", "Nhập sai mã PIN 3 lần liên tiếp trên bàn phím Keypad 4x4");
+        publishEvent("KEYPAD_LOCKOUT");
+        sendSecurityAlertWithPhoto("WRONG_PIN_3_TIMES", "Nhập sai mã PIN nhiều lần liên tiếp trên bàn phím Keypad 4x4");
         failedPinAttempts = 0;
       }
     }
     return;
   }
 
-  // Nhập ký tự số (0 - 9)
+  // Nhập ký tự số (0 - 9). Không log từng phím (bí mật).
   if (key >= '0' && key <= '9') {
     if (inputPinBuffer.length() < 10) {
       inputPinBuffer += key;
-      Serial.printf("[PIN] Đã nhập ký tự: '%c' (Độ dài: %d/10)\n", key, inputPinBuffer.length());
+      Serial.printf("[PIN] Độ dài: %d/10\n", inputPinBuffer.length());
     }
   }
 }
@@ -766,22 +911,18 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n============================================================");
-  Serial.println(" HỆ THỐNG KHÓA CỬA THÔNG MINH AIoT - ESP32-S3 N16R8 CAM ");
+  Serial.println(" HỆ THỐNG KHÓA CỬA THÔNG MINH AIoT - ESP32-S3 N16R8 CAM (L3) ");
   Serial.println("============================================================");
 
   if (camMutex == NULL) {
     camMutex = xSemaphoreCreateMutex();
   }
 
-  // 1. Khởi tạo Camera OV2640 chuẩn Freenove N16R8
-  setupCamera();
-
+  // Trạng thái an toàn trước mọi thứ khác: khóa, relay tắt
   pinMode(PIN_LED, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(PIN_PIR, INPUT);
-
-  // Trạng thái chờ: ĐÈN LED TẮT HOÀN TOÀN
   digitalWrite(PIN_LED, LOW);
   digitalWrite(PIN_BUZZER, LOW);
   digitalWrite(PIN_RELAY, RELAY_OFF);
@@ -792,73 +933,87 @@ void setup() {
   doorServo.attach(PIN_SERVO, 500, 2400);
   doorServo.write(SERVO_LOCK_ANGLE);
 
-  // 2. Kết nối Wi-Fi
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = &relockTimerCallback;
+  timerArgs.name = "relock";
+  esp_timer_create(&timerArgs, &relockTimer);
+
+  // Trạng thái chống phát lại và lockdown sống sót qua reboot
+  prefs.begin("smartlock", false);
+  lastSeq = prefs.getULong64("lastSeq", 0);
+  lastCmdId = prefs.getString("lastCmd", "");
+  lastAckJson = prefs.getString("lastAck", "");
+  isEmergencyLockdown = prefs.getBool("lockdown", false);
+  Serial.printf("[NVS] lastSeq=%s lockdown=%s\n", u64ToString(lastSeq).c_str(), isEmergencyLockdown ? "ON" : "OFF");
+
+  caConfigured = strstr(ROOT_CA_PEM, "BEGIN CERTIFICATE") != nullptr;
+  if (!caConfigured) Serial.println("[TLS] CHƯA CẤU HÌNH ROOT_CA_PEM trong config.h - tạm ngừng kết nối cloud.");
+  if (strlen(DEVICE_TOKEN) == 0) Serial.println("[AUTH] CHƯA CẤU HÌNH DEVICE_TOKEN trong config.h.");
+
+  // 1. Khởi tạo Camera OV2640 chuẩn Freenove N16R8
+  setupCamera();
+
+  // 2. Kết nối Wi-Fi và đồng bộ thời gian
   connectWiFi();
+  if (WiFi.status() == WL_CONNECTED) syncClock(10000);
 
-  // 3. Đăng ký các tuyến đường Web Server trên CỔNG 80
-  server.on("/", HTTP_GET, handleRoot80);
-  server.on("/capture", HTTP_GET, handleCapture80);
-  server.on("/capture", HTTP_OPTIONS, handleOptions80);
-  server.on("/status", HTTP_GET, handleStatus80);
-  server.on("/status", HTTP_OPTIONS, handleOptions80);
-
-  if (WiFi.status() == WL_CONNECTED) {
-    server.begin();
-    Serial.println("------------------------------------------------------------");
-    Serial.printf("[CAMERA WEB VIEWER] Mở trực tiếp tại : http://%s/\n", WiFi.localIP().toString().c_str());
-    Serial.printf("[CAMERA CAPTURE]     Chụp ảnh tĩnh:    http://%s/capture\n", WiFi.localIP().toString().c_str());
-    Serial.println("------------------------------------------------------------");
-  }
-
-  // 4. Cấu hình MQTT Broker
-  mqttClient.setServer(server_ip, 1883);
-  mqttClient.setCallback(mqttCallback);
+  // 3. Kênh lệnh WebSocket bảo mật (CA + hostname kiểm chứng; không setInsecure)
+  startWebSocket();
 
   // Ổn định cảm biến PIR trong 10 giây
   pirWarmupEnd = millis() + 10000;
-  Serial.println("[PIR] Đang ổn định cảm biến trong 10 giây (Đèn LED tắt)...");
+  Serial.println("[PIR] Đang ổn định cảm biến trong 10 giây...");
   Serial.println("[HỆ THỐNG] Đã sẵn sàng hoạt động!");
 }
 
 void loop() {
   unsigned long now = millis();
 
+  // Hoàn tất khóa lại do esp_timer: tiếng bíp, sự kiện và nghỉ PIR
+  if (relockPending) {
+    relockPending = false;
+    Serial.println(">>> [ĐÓNG CỬA] Hết thời gian mở, đã khóa lại cửa. <<<");
+    beep(1, 150);
+    publishEvent("DOOR_LOCKED", activeUnlockCommandId);
+    lastPirTrigger = millis() + PIR_POST_UNLOCK_MS;
+    pirRequiresRelease = true;
+    publishStatus();
+  }
+  // Dự phòng nếu timer không chạy vì lý do nào đó
+  if (isDoorUnlocked && now - doorUnlockTime >= activeUnlockMs + 1000) lockNow();
+
   // Tự động thử kết nối lại Wi-Fi trong nền nếu rớt mạng
   static unsigned long lastWifiRetry = 0;
-  static bool serverRunning = false;
-
+  static unsigned long lastClockRetry = 0;
   if (WiFi.status() != WL_CONNECTED) {
-    serverRunning = false;
+    // Mỗi lần thử lại chuyển sang mạng kế tiếp; chỉ một mạng thì luôn thử lại mạng đó.
     if (now - lastWifiRetry >= 8000) {
       lastWifiRetry = now;
-      Serial.printf("[WIFI] Đang thử kết nối lại Wi-Fi '%s'...\n", wifi_ssid);
-      WiFi.begin(wifi_ssid, wifi_password);
+      beginWifi(wifiIndex + 1);
     }
   } else {
-    if (!serverRunning) {
-      server.begin();
-      serverRunning = true;
-      Serial.println("\n------------------------------------------------------------");
-      Serial.printf("[WIFI OK] Đã có IP: %s\n", WiFi.localIP().toString().c_str());
-      Serial.printf("[CAMERA WEB VIEWER] Mở tại: http://%s/\n", WiFi.localIP().toString().c_str());
-      Serial.println("------------------------------------------------------------");
-    }
-
-    server.handleClient();
-
-    if (!mqttClient.connected()) reconnectMqtt();
-    else mqttClient.loop();
-  }
-
-  // 1. Tự động đóng cửa sau khi mở đủ 7 giây (tránh lỗi underflow thời gian khi có lệnh kép)
-  if (isDoorUnlocked) {
-    unsigned long currentMillis = millis();
-    if (currentMillis >= doorUnlockTime && (currentMillis - doorUnlockTime >= UNLOCK_DURATION_MS)) {
-      lockDoor();
+    if (!timeSynced() && now - lastClockRetry >= 30000) { lastClockRetry = now; syncClock(2000); }
+    startWebSocket();
+    if (wsStarted) {
+      ws.loop(); // nhận lệnh, gửi ping, tự kết nối lại
+      if (wsConnected && millis() - lastHeartbeat >= HEARTBEAT_MS) publishStatus();
+      if (wsConnected && !isDoorUnlocked && !awaitCommandUntil) keepApiWarm();
+      if (wsConnected && (long)(previewUntil - millis()) > 0 && millis() - lastPreviewFrame >= PREVIEW_INTERVAL_MS) {
+        lastPreviewFrame = millis();
+        sendPreviewFrame();
+      }
     }
   }
 
-  // 2. Kiểm tra trạng thái khóa bàn phím do sai PIN 3 lần
+  // Hết thời gian chờ command sau khi được chấp thuận
+  if (awaitCommandUntil && !isDoorUnlocked && now > awaitCommandUntil) {
+    awaitCommandUntil = 0;
+    Serial.println("[CLOUD] Không nhận được command mở trong thời hạn. Cửa giữ nguyên khóa.");
+    digitalWrite(PIN_LED, LOW);
+    beep(3, 60, 60);
+  }
+
+  // Kiểm tra trạng thái khóa bàn phím do sai PIN
   if (isSystemLockedOut) {
     if (now - lockoutStartTime >= LOCKOUT_DURATION_MS) {
       isSystemLockedOut = false;
@@ -871,72 +1026,55 @@ void loop() {
     }
   }
 
-  // 3. Đọc bàn phím Keypad 4x4
+  // Đọc bàn phím Keypad 4x4
   char key = keypad.getKey();
   if (key) handleKeypadInput(key);
 
-  // 4. Cảm biến chuyển động PIR: Tự bật LED và chụp ảnh xác thực khuôn mặt
-  if (now > pirWarmupEnd && !isDoorUnlocked) {
+  // Cảm biến chuyển động PIR: tự bật LED và gửi ảnh xác thực lên cloud
+  if (now > pirWarmupEnd && !isDoorUnlocked && !awaitCommandUntil) {
     int pirState = digitalRead(PIN_PIR);
-    
+
     // Nếu cảm biến đã hạ về LOW, xóa cờ chờ nhả
     if (pirState == LOW) {
       pirRequiresRelease = false;
-      if (!isDoorUnlocked) {
-        digitalWrite(PIN_LED, LOW);
-      }
+      digitalWrite(PIN_LED, LOW);
     }
-    
-    // ĐIỀU KIỆN KÍCH HOẠT CHỤP ẢNH:
-    // 1. pirState == HIGH (phát hiện có người)
-    // 2. !pirRequiresRelease (cảm biến đã từng hạ về LOW, tránh quét lặp liên tục khi chân OUT bị treo HIGH)
-    // 3. now >= lastPirTrigger (đã hết thời gian nghỉ cooldown)
-    if (pirState == HIGH && !pirRequiresRelease && (now >= lastPirTrigger)) {
-      Serial.println("\n[PIR] Phát hiện người trước cửa! Bật LED và chụp ảnh gửi AI...");
-      
-      digitalWrite(PIN_LED, HIGH); // Bật LED trợ sáng êm ái (BỎ tiếng beep gây ồn)
 
-      if (mqttClient.connected()) {
-        mqttClient.publish(MQTT_TOPIC_PUB, "PIR_MOTION_DETECTED");
-      }
+    if (pirState == HIGH && !pirRequiresRelease && (now >= lastPirTrigger)) {
+      Serial.println("\n[PIR] Phát hiện người trước cửa! Bật LED và gửi ảnh lên cloud...");
+      digitalWrite(PIN_LED, HIGH);
+      publishEvent("PIR_MOTION");
 
       if (isEmergencyLockdown) {
-        Serial.println("[PIR] Cửa đang bị VÔ HIỆU HÓA KHẨN CẤP bởi Admin! Bỏ qua nhận diện.");
+        Serial.println("[PIR] Cửa đang bị VÔ HIỆU HÓA KHẨN CẤP! Bỏ qua nhận diện.");
         digitalWrite(PIN_LED, LOW);
         beep(3, 100, 60);
         lastPirTrigger = millis() + 10000;
         pirRequiresRelease = true;
       } else {
-        // Chụp và gửi ảnh lên Backend Core để xác thực
-        bool authOk = captureAndSendToBackend(backendVerifyUrl, "PIR_AUTO_FACE_SCAN");
+        Decision decision = captureAndVerifyFace();
 
-        if (authOk) {
+        if (decision == Decision::Granted) {
           consecutivePirFaceFails = 0;
           pirRequiresRelease = true;
-          unlockDoor("Xác thực khuôn mặt AI tự động (qua PIR)");
-          // Thời gian nghỉ sẽ được gán trong lockDoor() sau khi cửa đóng lại
+          onGranted();
+        } else if (decision == Decision::Unavailable || decision == Decision::Lockdown || decision == Decision::Throttled) {
+          digitalWrite(PIN_LED, LOW);
+          lastPirTrigger = millis() + PIR_COOLDOWN_MS;
         } else {
           consecutivePirFaceFails++;
-          Serial.printf("[AI] Không khớp người quen (Lần %d/5). Tắt LED.\n", consecutivePirFaceFails);
-          digitalWrite(PIN_LED, LOW); // Tắt LED ngay nếu không nhận diện được
-
-          // 2 tiếng bip ngắn nhẹ nhàng báo không nhận diện được (không chói tai)
+          Serial.printf("[AI] Không được chấp thuận (Lần %d/5). Tắt LED.\n", consecutivePirFaceFails);
+          digitalWrite(PIN_LED, LOW);
           beep(2, 60, 40);
-
-          // Cập nhật thời gian nghỉ giữa các lần quét thử: 10 giây tính từ SAU KHI quét xong
           lastPirTrigger = millis() + PIR_COOLDOWN_MS;
 
-          // YÊU CẦU 3: Nếu quét mặt thất bại quá 5 lần -> Cảnh báo + gửi ảnh kẻ lạ về Admin
+          // Cloud từ chối khuôn mặt 5 lần liên tiếp -> Cảnh báo + gửi ảnh kẻ lạ về Admin
           if (consecutivePirFaceFails >= 5) {
-            Serial.println("!!! [BÁO ĐỘNG KẺ LẠ] Nhận diện khuôn mặt thất bại 5 lần liên tiếp! Báo động và gửi ảnh cho Admin !!!");
+            Serial.println("!!! [BÁO ĐỘNG KẺ LẠ] Bị từ chối 5 lần liên tiếp! Gửi ảnh cho Admin !!!");
             beep(6, 200, 100);
-            sendSecurityAlertWithPhoto("PIR_INTRUDER_5_TIMES", "Phát hiện chuyển động: Nhận diện khuôn mặt thất bại 5 lần liên tiếp (Kẻ lạ)");
-            if (mqttClient.connected()) {
-              mqttClient.publish(MQTT_TOPIC_PUB, "INTRUDER_ALERT_PIR_5_TIMES");
-            }
+            sendSecurityAlertWithPhoto("PIR_INTRUDER_5_TIMES", "Phát hiện chuyển động: khuôn mặt bị từ chối 5 lần liên tiếp");
+            publishEvent("FACE_FAIL_STREAK");
             consecutivePirFaceFails = 0;
-
-            // NGHỈ 30 GIÂY VÀ BẮT BUỘC PIR PHẢI NHẢ VỀ LOW MỚI ĐƯỢC PHÉP HOẠT ĐỘNG TIẾP
             lastPirTrigger = millis() + PIR_ALERT_LOCKOUT_MS;
             pirRequiresRelease = true;
             Serial.println("[PIR] Đã kích hoạt thời gian nghỉ 30 giây sau cảnh báo.");

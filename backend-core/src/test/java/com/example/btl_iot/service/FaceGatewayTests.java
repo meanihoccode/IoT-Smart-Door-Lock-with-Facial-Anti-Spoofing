@@ -34,6 +34,12 @@ class FaceGatewayTests {
         answer("verify-face", success());
         assertEquals(new FaceGateway.FaceMatch(1L,false,"FACE_VERIFIED","req-test"),gateway.identify(image)); server.verify();
     }
+    @Test void aiBaseUrlIsConfigurableForPrivateContainerNetwork() {
+        var client = new RestTemplate(); var private_ = new FaceGateway(client, "http://ai:8000/api");
+        var aiServer = MockRestServiceServer.bindTo(client).build();
+        aiServer.expect(requestTo("http://ai:8000/api/verify-face")).andRespond(withSuccess(success(),MediaType.APPLICATION_JSON));
+        assertEquals(1L, private_.identify(image).userId()); aiServer.verify();
+    }
     @Test void missingOrMalformedAiFieldsNeverAuthorize() {
         for (String json : new String[]{"{}","{\"is_real\":true,\"recognized\":true}",
                 "{\"is_real\":true,\"recognized\":true,\"user_id\":1}",

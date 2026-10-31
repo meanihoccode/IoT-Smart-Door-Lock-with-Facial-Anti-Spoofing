@@ -1,7 +1,29 @@
 #pragma once
 
-// Copy to config.h and enter your local Wi-Fi and broker IP before flashing.
-// config.h is private and ignored by Git.
+// Copy to config.h (same folder) and fill in before flashing. config.h is private and ignored by Git.
+// Never commit real Wi-Fi passwords or device tokens. See deploy/README.md.
+// ESP32-S3 joins 2.4 GHz WPA2-Personal networks only (no 5 GHz, no captive portal / enterprise login).
 #define WIFI_SSID "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-#define MQTT_SERVER "192.168.1.100"
+// Optional fallback network (e.g. a phone hotspot for demos elsewhere). Leave empty to disable.
+#define WIFI_SSID_2 ""
+#define WIFI_PASSWORD_2 ""
+
+// One cloud domain for REST (https://CLOUD_HOST/api/...) and the command WebSocket (wss://CLOUD_HOST/ws/device).
+#define CLOUD_HOST "smartlock.example.com"
+#define CLOUD_PORT 443
+
+// Device identity. DEVICE_TOKEN: 64 hex chars; the server stores only its SHA-256.
+// The same token authenticates REST requests and the WebSocket handshake.
+#define DEVICE_ID "door-01"
+#define DEVICE_TOKEN ""
+
+#define NTP_SERVER "pool.ntp.org"
+
+// Root CA(s) that sign the server certificate. With Let's Encrypt, paste ISRG Root X1 and X2 from
+// https://letsencrypt.org/certificates/ (verify the fingerprints there). Without a certificate here the
+// firmware refuses all cloud connections; it never falls back to insecure TLS.
+#define SMARTLOCK_HAS_ROOT_CA 1
+static const char ROOT_CA_PEM[] = R"PEM(
+PASTE_ROOT_CA_PEM_HERE
+)PEM";

@@ -1,0 +1,6 @@
+build
+.gradle
+.env
+config/application-local.properties
+uploads
+patch_controller.py

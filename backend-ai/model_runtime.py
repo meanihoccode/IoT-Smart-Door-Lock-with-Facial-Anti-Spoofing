@@ -1,5 +1,6 @@
 """Explicit model loading for both FastAPI lifespan and offline commands."""
 import logging
+import os
 from pathlib import Path
 
 from baseline_config import BASELINE
@@ -10,6 +11,8 @@ logger = logging.getLogger("face-auth")
 def load_models(model_root=None, liveness_dir=None):
     from anti_spoofing import AntiSpoofingModel
 
+    # Containers mount the pre-provisioned model directory; models are never downloaded at runtime.
+    model_root = model_root or os.getenv("SMARTLOCK_INSIGHTFACE_ROOT")
     root = Path(model_root).resolve() if model_root else Path.home() / ".insightface"
     face_app = None
     try:
