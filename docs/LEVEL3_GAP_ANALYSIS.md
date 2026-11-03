@@ -68,6 +68,12 @@ Cập nhật 26/10/2026 sau đợt triển khai P0 trong code. Quy ước bằng
 
 Triển khai G18, 03/11/2026: GitHub/EC2 nhận commit `5dbf4804`, build/recreate riêng Web thành công; Core/AI/DB giữ nguyên container. Cloud phục vụ `/assets/index-D12hYcif.js` có logic decode/nhịp tải mới; HTTPS 200/TLS hợp lệ, HTTP 308, API admin anonymous 401. DB/AI healthy, ba dependency AI ready. Backup DB/ảnh tại `/home/ubuntu/smartlock-releases/camera-20261103-061928`, đã sao chép về `.runtime/cloud-camera-backups-20261103/` và kiểm tra gzip/tar đọc được. Thiết bị `OFFLINE`; đây là kiểm tra triển khai Web, chưa phải thử độ mượt/FPS với phần cứng. Firmware 200 ms cần nạp riêng vào board.
 
+### Màu trạng thái nhật ký theo yêu cầu 03/11/2026
+
+| ID | Mức | Phát hiện và tác động | Hướng xử lý | Trạng thái / file thay đổi / bằng chứng |
+| --- | --- | --- | --- | --- |
+| G19 | P1, đã được giao | Nhật ký dùng nhánh đỏ/X cho `COMMAND_EXECUTED` dù thiết bị đã thực thi lệnh; bản ghi `SUCCESS` cũ lại ghi cửa đã mở. | Nhãn `COMMAND_EXECUTED` xanh lá/dấu check, tooltip phân biệt chấp hành và cảm biến; `SUCCESS` cũ màu amber với nội dung đã gửi lệnh. | **Đã xác minh giả lập** — `frontend/src/SecurityAudit.jsx`; 15/15 test, lint 0 lỗi (5 cảnh báo cũ), build vào `.runtime/command-status-frontend-build-20261103` đạt; Chromium với API giả (`.runtime/check_command_badge.py`) PASS xanh/check cho EXECUTED, đỏ/X cho NO_FACE/FAILED/SPOOF_DETECTED, nội dung SUCCESS cũ. Chỉ đổi hiển thị, không phát lệnh cửa. |
+
 ## Kiến trúc đề xuất, chưa phải hạ tầng đã chốt
 
 ```text

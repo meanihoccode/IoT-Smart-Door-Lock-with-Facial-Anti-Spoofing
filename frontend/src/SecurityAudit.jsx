@@ -181,9 +181,13 @@ export default function SecurityAudit() {
                           </span>
                         </td>
                         <td className="p-4">
-                          {item.status === 'SUCCESS' ? (
-                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-50 text-green-700 border border-green-200">
-                              <CheckCircle2 size={13} /> Thành công (Đã mở cửa)
+                          {item.status === 'COMMAND_EXECUTED' ? (
+                            <span title="Thiết bị đã điều khiển khóa; chưa có cảm biến xác nhận cửa mở." className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-green-50 text-green-700 border border-green-200">
+                              <CheckCircle2 size={13} /> COMMAND_EXECUTED
+                            </span>
+                          ) : item.status === 'SUCCESS' ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                              Đã gửi lệnh (bản ghi cũ)
                             </span>
                           ) : item.status === 'COMMAND_FAILED' ? (
                             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
