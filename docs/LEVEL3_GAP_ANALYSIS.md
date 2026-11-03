@@ -60,6 +60,12 @@ Cập nhật 26/10/2026 sau đợt triển khai P0 trong code. Quy ước bằng
 
 Đã push `level3-cloud` @ `8bdfb136` và fast-forward EC2 từ `843a8dad`; build/recreate Core và Web thành công. G16/G17 đã có trên bundle cloud `/assets/index-BH77iNUN.js` (kiểm tra chuỗi thống kê và class bố cục); HTTPS 200/TLS hợp lệ, HTTP 308, `/api/overview` anonymous vẫn 401. DB/AI healthy, AI ready đủ model và DB. Đây là kiểm tra triển khai/health, chưa xác minh dashboard bằng phiên admin thật hoặc phần cứng; các ca UI/logic vẫn là bằng chứng giả lập ở từng dòng trên. Backup DB/ảnh đã kiểm tra gzip/tar và sao chép ra máy local; image rollback giữ trên VM. Xem [sổ bằng chứng](ACCEPTANCE.md#sổ-bằng-chứng). Thiết bị `OFFLINE`; không flash/phát lệnh tới cửa thật.
 
+### Tối ưu nhẹ camera theo yêu cầu 03/11/2026
+
+| ID | Mức | Phát hiện và tác động | Hướng xử lý | Trạng thái / file thay đổi / bằng chứng |
+| --- | --- | --- | --- | --- |
+| G18 | P1, đã được giao | Preview ESP32 giới hạn ~3 FPS; frontend chờ thêm 350 ms sau mỗi lần tải và thay URL trước khi giải mã ảnh, giảm độ mượt. | Khoảng gửi ESP32 200 ms; frontend nhịp mục tiêu 200 ms gồm tải/giải mã, nghỉ tối thiểu 75 ms; một request, decode trước hiển thị, timeout/hủy và backoff 1 giây khi lỗi/204/ẩn tab. | **Đã xác minh giả lập, chờ triển khai cloud/phần cứng** — `esp32/main/main.ino`, `frontend/src/use-live-frame.js`; [DEVICE_CONTRACT](DEVICE_CONTRACT.md#xem-trước-camera-chỉ-hiển-thị--đã-triển-khai-27102026). Frontend 15/15 test, lint 0 lỗi (5 cảnh báo cũ), build vào `.runtime/camera-frontend-build-20261103` đạt. `frontend/test/check_live_preview.py` với Chromium/API giả: PASS giải mã trước hiển thị, nhịp có giới hạn, không request chồng khi mạng chậm, ảnh hỏng/204, ẩn rồi hiện tab trong lúc decode, abort khi tắt, bật lại và giải phóng URL khi rời tab. Compile ESP32-S3 core 3.3.12/FQBN N16R8: exit 0, 1.217.670 B flash, 59.940 B RAM tĩnh. Mục tiêu ~5 FPS, chưa đo FPS/độ trễ thật; HTTP AI đồng bộ vẫn có thể làm preview khựng. |
+
 ## Kiến trúc đề xuất, chưa phải hạ tầng đã chốt
 
 ```text
