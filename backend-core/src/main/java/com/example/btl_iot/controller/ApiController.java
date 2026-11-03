@@ -18,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 @RequestMapping("/api")
 // Browser routes never unlock: face/PIN unlock exists only under /api/device (DEVICE_CONTRACT, D02/D04).
 public class ApiController {
+    public record FaceStats(long attempts, long granted, long spoofDetected, Double successRate) {}
     private final UserRepository userRepository;
     private final AccessLogRepository accessLogRepository;
     private final ProfileService profiles;
@@ -41,8 +42,13 @@ public class ApiController {
         long totalEmployees = userRepository.count();
         
         LocalDateTime startOfDay = LocalDateTime.now().withHour(0).withMinute(0).withSecond(0).withNano(0);
-        LocalDateTime endOfDay = LocalDateTime.now().withHour(23).withMinute(59).withSecond(59).withNano(999999999);
-        long accessesToday = accessLogRepository.countByAccessTimeBetween(startOfDay, endOfDay);
+        LocalDateTime endOfDay = startOfDay.plusDays(1);
+        long accessesToday = accessLogRepository.countByAccessTimeBetween(startOfDay, endOfDay.minusNanos(1));
+        var faceCounts = accessLogRepository.summarizeFaceAttempts(startOfDay, endOfDay);
+        Double successRate = faceCounts.getAttempts() == 0 ? null
+                : Math.round(1000.0 * faceCounts.getGranted() / faceCounts.getAttempts()) / 10.0;
+        var faceStats = new FaceStats(faceCounts.getAttempts(), faceCounts.getGranted(),
+                faceCounts.getSpoofDetected(), successRate);
         
         java.util.List<AccessLog> recentLogs = accessLogRepository.findTop5ByOrderByAccessTimeDesc();
         
@@ -64,6 +70,7 @@ public class ApiController {
         return ResponseEntity.ok(Map.of(
             "totalEmployees", totalEmployees,
             "accessesToday", accessesToday,
+            "faceStatsToday", faceStats,
             "recentLogs", recentLogsData
         ));
     }

@@ -1,6 +1,7 @@
 package com.example.btl_iot;
 
 import com.example.btl_iot.entity.DoorCommand;
+import com.example.btl_iot.entity.AccessLog;
 import com.example.btl_iot.entity.User;
 import com.example.btl_iot.repository.*;
 import com.example.btl_iot.security.AttemptLimiter;
@@ -12,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.net.*;
 import java.net.http.*;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.UUID;
 import javax.imageio.ImageIO;
@@ -410,6 +412,77 @@ class BtlIotApplicationTests {
         assertEquals("FACE_VERIFIED",json.readTree(granted.body()).path("reasonCode").asText());
         verify(channel,times(1)).send(eq("door-01"),anyString());
     }
+    @Test void overviewWithoutFaceAttemptsHasNoInventedSuccessRate() throws Exception {
+        var browser = new Browser(); browser.login();
+        var response = browser.get("/overview");
+        assertEquals(200, response.statusCode());
+        var stats = json.readTree(response.body()).path("faceStatsToday");
+        assertEquals(0, stats.path("attempts").asLong());
+        assertEquals(0, stats.path("granted").asLong());
+        assertEquals(0, stats.path("spoofDetected").asLong());
+        assertTrue(stats.path("successRate").isNull());
+    }
+
+    @Test void overviewCountsAllRecordedFaceAttemptsAndSeparatesGrantFromCommandOutcome() throws Exception {
+        var profile = profiles.create("overview", "Overview", "123456", "[1]", "testadmin");
+        var door = new Door();
+        when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(profile.id(), false));
+        assertEquals(202, door.face().statusCode()); // published, no execution ACK
+        ack(commandId(door.face()), "EXECUTED");
+        when(channel.send(anyString(), anyString())).thenReturn(false);
+        assertEquals(503, door.face().statusCode()); // grant still counted when delivery fails
+        when(faces.identify(any())).thenReturn(new FaceGateway.FaceMatch(null, true));
+        assertEquals(401, door.face().statusCode());
+        when(faces.identify(any())).thenReturn(FaceGateway.FaceMatch.rejected("NOT_RECOGNIZED", "overview-stranger"));
+        assertEquals(401, door.face().statusCode());
+        when(faces.identify(any())).thenReturn(FaceGateway.FaceMatch.rejected("MODEL_UNAVAILABLE", "overview-error"));
+        assertEquals(503, door.face().statusCode());
+        door.pin("123456"); // PIN and remote admin grants must not change face metrics
+        var browser = new Browser(); browser.login();
+        browser.post("/admin/door/open", Map.of(), browser.csrf());
+        var body = json.readTree(browser.get("/overview").body());
+        var stats = body.path("faceStatsToday");
+        assertEquals(6, stats.path("attempts").asLong());
+        assertEquals(3, stats.path("granted").asLong());
+        assertEquals(1, stats.path("spoofDetected").asLong());
+        assertEquals(50.0, stats.path("successRate").asDouble());
+        assertEquals(8, body.path("accessesToday").asLong());
+        assertEquals(5, body.path("recentLogs").size()); // statistics cover more than this list
+    }
+
+    @Test void overviewUsesTodayOnlyAndKeepsZeroSuccessDistinctFromNoData() throws Exception {
+        var start = LocalDateTime.now().toLocalDate().atStartOfDay();
+        saveOverviewLog("FACE", "SPOOF_DETECTED", null, start);
+        saveOverviewLog("FACE", "NO_FACE", null, start.plusHours(1));
+        saveOverviewLog("FACE", "COMMAND_EXECUTED", "yesterday", start.minusSeconds(1));
+        saveOverviewLog("FACE", "SPOOF_DETECTED", null, start.plusDays(1));
+        saveOverviewLog("PIN", "SPOOF_DETECTED", null, start.plusHours(1));
+        var browser = new Browser(); browser.login();
+        var stats = json.readTree(browser.get("/overview").body()).path("faceStatsToday");
+        assertEquals(2, stats.path("attempts").asLong());
+        assertEquals(0, stats.path("granted").asLong());
+        assertEquals(1, stats.path("spoofDetected").asLong());
+        assertEquals(0.0, stats.path("successRate").asDouble());
+    }
+
+    @Test void overviewRoundsTheSuccessRateAndDoesNotInferGrantsFromLegacySuccess() throws Exception {
+        var today = LocalDateTime.now();
+        saveOverviewLog("FACE", "COMMAND_UNKNOWN", "test-grant", today);
+        saveOverviewLog("FACE", "SUCCESS", null, today);
+        saveOverviewLog("FACE", "SPOOF_DETECTED", null, today);
+        var browser = new Browser(); browser.login();
+        var stats = json.readTree(browser.get("/overview").body()).path("faceStatsToday");
+        assertEquals(3, stats.path("attempts").asLong());
+        assertEquals(1, stats.path("granted").asLong());
+        assertEquals(33.3, stats.path("successRate").asDouble());
+    }
+
+    private void saveOverviewLog(String method, String status, String commandId, LocalDateTime time) {
+        var log = new AccessLog();
+        log.setAccessMethod(method); log.setStatus(status); log.setCommandId(commandId); log.setAccessTime(time);
+        accessLogs.saveAndFlush(log);
+    }
+
     @Test void kioskShowsMaskedNameMotionAndOutcomeOnlyAfterDeviceAck() throws Exception {
         var profile = profiles.create("hung","Vương Quốc Hưng","123456","[1]","testadmin");
         var browser = new Browser(); var door = new Door();

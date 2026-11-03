@@ -85,6 +85,7 @@ const unsigned long PIR_COOLDOWN_MS        = 10000; // Khoảng cách giữa 2 l
 const unsigned long PIR_POST_UNLOCK_MS     = 15000; // Thời gian nghỉ sau khi cửa khóa lại
 const unsigned long PIR_ALERT_LOCKOUT_MS   = 30000; // Thời gian nghỉ sau khi cảnh báo kẻ lạ 5 lần
 const unsigned long LOCKOUT_DURATION_MS    = 15000; // Khóa bàn phím 15 giây nếu nhập sai PIN 3 lần
+const unsigned long PIN_ENTRY_TIMEOUT_MS   = 15000; // Không thao tác 15 giây: hủy nhập PIN, cho quét mặt lại
 const unsigned long HEARTBEAT_MS           = 60000; // Trạng thái định kỳ để cloud phân biệt online/stale
 const unsigned long AWAIT_COMMAND_MS       = 15000; // Chờ command sau khi cloud chấp thuận
 const long          CLOCK_SKEW_S           = 5;     // Sai lệch đồng hồ chấp nhận khi kiểm TTL
@@ -178,6 +179,8 @@ bool caConfigured = false;
 
 // Biến trạng thái hệ thống
 String inputPinBuffer          = "";
+bool pinEntryActive            = false; // Giữ cả khi đã gửi PIN để người dùng có thời gian thử lại
+unsigned long lastPinActivity  = 0;
 int failedPinAttempts          = 0;
 int consecutivePirFaceFails    = 0; // Đếm số lần cloud từ chối khuôn mặt liên tiếp của PIR
 volatile bool isDoorUnlocked   = false;
@@ -818,6 +821,7 @@ void handleKeypadInput(char key) {
 
   if (key == '*' || key == 'C') {
     inputPinBuffer = "";
+    pinEntryActive = false;
     Serial.println("[KEYPAD] Đã xóa mã PIN.");
     return;
   }
@@ -828,6 +832,10 @@ void handleKeypadInput(char key) {
 
   // Phím 'D' = Chuông cửa & Quét khuôn mặt AI trên cloud
   if (key == 'D') {
+    if (pinEntryActive || awaitCommandUntil) {
+      Serial.println("[KEYPAD] Đang nhập PIN/chờ command. Hủy bằng '*' hoặc 'C' trước khi quét mặt.");
+      return;
+    }
     if (isEmergencyLockdown) {
       Serial.println("[CHUÔNG CỬA] Cửa đang bị vô hiệu hóa khẩn cấp!");
       beep(3, 80, 50);
@@ -854,6 +862,7 @@ void handleKeypadInput(char key) {
 
   // Phím '#' = Xác nhận mã PIN
   if (key == '#') {
+    if (isDoorUnlocked || awaitCommandUntil) return;
     if (isEmergencyLockdown) {
       Serial.println("[KEYPAD] Cửa đang bị vô hiệu hóa khẩn cấp!");
       inputPinBuffer = "";
@@ -892,11 +901,16 @@ void handleKeypadInput(char key) {
         failedPinAttempts = 0;
       }
     }
+    // HTTP và cảnh báo có thể chặn lâu: tính thời gian thử lại từ lúc xử lý xong.
+    lastPinActivity = millis();
     return;
   }
 
   // Nhập ký tự số (0 - 9). Không log từng phím (bí mật).
   if (key >= '0' && key <= '9') {
+    if (isDoorUnlocked || awaitCommandUntil || isEmergencyLockdown) return;
+    pinEntryActive = true;
+    lastPinActivity = millis();
     if (inputPinBuffer.length() < 10) {
       inputPinBuffer += key;
       Serial.printf("[PIN] Độ dài: %d/10\n", inputPinBuffer.length());
@@ -1026,12 +1040,24 @@ void loop() {
     }
   }
 
-  // Đọc bàn phím Keypad 4x4
+  // Hủy phiên PIN khi cửa đã mở hoặc không thao tác 15 giây.
+  // Không hết phiên trong lúc đang chờ command đã được cloud chấp thuận.
+  now = millis();
+  if (pinEntryActive && (isDoorUnlocked ||
+      (!awaitCommandUntil && now - lastPinActivity >= PIN_ENTRY_TIMEOUT_MS))) {
+    inputPinBuffer = "";
+    pinEntryActive = false;
+    Serial.println("[KEYPAD] Kết thúc phiên nhập PIN.");
+  }
+
+  // Đọc bàn phím Keypad 4x4 trước PIR để ưu tiên chữ số đầu tiên.
   char key = keypad.getKey();
   if (key) handleKeypadInput(key);
 
   // Cảm biến chuyển động PIR: tự bật LED và gửi ảnh xác thực lên cloud
-  if (now > pirWarmupEnd && !isDoorUnlocked && !awaitCommandUntil) {
+  now = millis();
+  if (now > pirWarmupEnd && !isDoorUnlocked && !awaitCommandUntil &&
+      !pinEntryActive && !isSystemLockedOut) {
     int pirState = digitalRead(PIN_PIR);
 
     // Nếu cảm biến đã hạ về LOW, xóa cờ chờ nhả

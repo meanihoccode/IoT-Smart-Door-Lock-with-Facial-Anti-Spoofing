@@ -52,6 +52,17 @@ Core tạo command trong transaction có khóa hàng hồ sơ + thiết bị (ki
 
 `EXECUTED` nghĩa là đã điều khiển chấp hành, **không** phải cảm biến xác nhận cửa mở. Lockdown sống sót qua reboot (NVS); khi thiết bị báo `status` khác `desired`, Core gửi lệnh lockdown mới (không chồng lệnh khi lệnh trước còn hiệu lực). Mất mạng/cloud: không có đường mở nào (đã bỏ master PIN), timer khóa lại chạy độc lập vòng `loop`.
 
+## Ưu tiên nhập PIN trên keypad — cập nhật 03/11/2026
+
+- Từ chữ số đầu tiên được firmware đọc, tạm ngừng xác thực khuôn mặt từ PIR và phím `D`. Keypad được đọc trước PIR trong vòng lặp. Camera xem trước vẫn hoạt động vì không tạo lệnh mở khóa.
+- `#` gửi PIN như trước; không bắt đầu xác thực mới khi cửa đang mở hoặc đang chờ command đã được cloud chấp thuận. REST chỉ trả quyết định, cửa vẫn chỉ mở bằng command WebSocket hợp lệ.
+- PIN bị từ chối hoặc cloud lỗi: giữ chế độ nhập PIN thêm 15 giây tính từ khi xử lý phản hồi/cảnh báo xong để nhập lại; mỗi chữ số làm mới thời gian chờ, kể cả khi bộ đệm đã đủ 10 ký tự. Không tính lỗi cloud là sai PIN.
+- `*`/`C` xóa PIN và hủy chế độ nhập; không thao tác 15 giây thì tự xóa PIN và cho phép quét mặt lại theo điều kiện PIR hiện có. Khi cửa đã mở, phiên nhập cũng được xóa. Hủy nhập không hủy command cloud đã phát; trong thời gian chờ command vẫn chặn xác thực mới.
+- Khóa keypad do sai PIN vẫn chặn PIR, kể cả ngay trong vòng lặp vừa kích hoạt khóa. Ảnh cảnh báo sai PIN vẫn được gửi, không phải yêu cầu nhận diện mở cửa.
+- Giới hạn: HTTP hiện đồng bộ; phím bấm trong lúc lượt nhận diện trước đó đang chờ cloud chưa được xử lý ngay. Thay đổi này không hủy request/command đã tạo trước khi firmware đọc chữ số đầu tiên.
+
+Bằng chứng giả lập: `python esp32/tests/test_pin_entry.py` (cần `g++`), trích handler và điều kiện từ firmware rồi chạy với HTTP/WebSocket/phần cứng giả. Chưa kiểm tra keypad/PIR trên phần cứng thật.
+
 ## Xem trước camera (chỉ hiển thị) — đã triển khai 27/10/2026
 
 - Admin mở khung "Camera cửa trực tiếp" → `GET /api/admin/door/live` (phiên admin); trang kiosk dùng `GET /api/kiosk/live` **công khai** theo D11. Core gửi xuống WebSocket `{"v":1,"kind":"preview","ms":15000}`, gia hạn tối đa mỗi 5 s khi admin còn xem.

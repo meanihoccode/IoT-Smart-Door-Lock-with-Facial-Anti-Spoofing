@@ -3,8 +3,9 @@ import axios from './api';
 import { Users, DoorOpen, ShieldCheck, Activity } from 'lucide-react';
 import DoorPanel from './DoorPanel';
 import { TONE_CLASSES, accessStatusLabel, methodLabel } from './door-status';
+import { faceStatsView } from './overview-stats';
 
-const StatCard = ({ title, value, icon: Icon, trend }) => (
+const StatCard = ({ title, value, icon: Icon, trend, description }) => (
     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
         <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-medium text-gray-500">{title}</h3>
@@ -20,22 +21,27 @@ const StatCard = ({ title, value, icon: Icon, trend }) => (
                 </span>
             )}
         </div>
+        {description && <p className="text-xs text-gray-500 mt-3">{description}</p>}
     </div>
 );
 
 const Overview = () => {
     const [data, setData] = useState({
-        totalEmployees: 0,
-        accessesToday: 0,
+        totalEmployees: null,
+        accessesToday: null,
         recentLogs: []
     });
+    const [loadError, setLoadError] = useState(false);
+    const faceStats = faceStatsView(data.faceStatsToday);
 
     useEffect(() => {
         const fetchData = async () => {
             try {
                 const res = await axios.get('/overview');
                 setData(res.data);
+                setLoadError(false);
             } catch (error) {
+                setLoadError(true);
                 console.error("Lỗi khi tải dữ liệu overview:", error);
             }
         };
@@ -58,11 +64,14 @@ const Overview = () => {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <StatCard title="Tổng hồ sơ ra vào" value={data.totalEmployees} icon={Users} />
-                <StatCard title="Lượt xác thực (Hôm nay)" value={data.accessesToday} icon={DoorOpen} />
-                <StatCard title="Tỷ lệ nhận diện đúng" value="--" icon={ShieldCheck} />
-                <StatCard title="Cảnh báo giả mạo" value="--" icon={Activity} />
+                <StatCard title="Tổng hồ sơ ra vào" value={data.totalEmployees ?? '—'} icon={Users} />
+                <StatCard title="Lượt xác thực (Hôm nay)" value={data.accessesToday ?? '—'} icon={DoorOpen} />
+                <StatCard title="Xác thực mặt thành công (Hôm nay)" value={faceStats.rate} icon={ShieldCheck}
+                    description={faceStats.description} />
+                <StatCard title="Cảnh báo giả mạo (Hôm nay)" value={faceStats.spoofDetected} icon={Activity}
+                    description="Số lượt quét được AI đánh dấu giả mạo; không gồm cảnh báo sai PIN hoặc người lạ." />
             </div>
+            {loadError && <p role="alert" className="text-sm text-amber-700">Không cập nhật được thống kê. Dữ liệu đang hiển thị có thể đã cũ.</p>}
 
             <DoorPanel />
 

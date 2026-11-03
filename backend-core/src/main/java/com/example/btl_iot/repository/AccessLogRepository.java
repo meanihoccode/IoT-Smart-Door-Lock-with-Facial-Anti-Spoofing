@@ -17,6 +17,20 @@ import java.util.List;
 @Repository
 public interface AccessLogRepository extends JpaRepository<AccessLog, Long> {
     long countByAccessTimeBetween(LocalDateTime start, LocalDateTime end);
+
+    interface FaceStats {
+        long getAttempts();
+        long getGranted();
+        long getSpoofDetected();
+    }
+
+    // A command ID records a granted decision, even if delivery/execution later fails.
+    // Aggregate in the DB rather than loading all images/profiles or only the five recent rows.
+    @Query("select count(a) as attempts, "
+            + "coalesce(sum(case when a.commandId is not null then 1 else 0 end), 0) as granted, "
+            + "coalesce(sum(case when a.status = 'SPOOF_DETECTED' then 1 else 0 end), 0) as spoofDetected "
+            + "from AccessLog a where a.accessMethod = 'FACE' and a.accessTime >= :start and a.accessTime < :end")
+    FaceStats summarizeFaceAttempts(@Param("start") LocalDateTime start, @Param("end") LocalDateTime end);
     
     List<AccessLog> findTop5ByOrderByAccessTimeDesc();
     

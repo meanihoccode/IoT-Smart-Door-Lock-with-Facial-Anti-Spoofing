@@ -19,10 +19,10 @@ const AdminLayout = () => {
     const isActive = (path) => currentPath === path;
 
     return (
-        <div className="min-h-screen bg-[#F9FAFB] flex font-sans text-gray-900 selection:bg-gray-200">
+        <div className="h-dvh overflow-hidden bg-[#F9FAFB] flex font-sans text-gray-900 selection:bg-gray-200">
             {/* Sidebar */}
-            <aside className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0">
-                <div className="h-16 flex items-center px-6 border-b border-gray-100">
+            <aside className="w-64 h-full min-h-0 bg-white border-r border-gray-200 flex flex-col shrink-0">
+                <div className="h-16 shrink-0 flex items-center px-6 border-b border-gray-100">
                     <div className="flex items-center gap-2 font-bold text-lg tracking-tight">
                         <div className="bg-gray-900 text-white p-1.5 rounded-lg shadow-sm">
                             <ShieldCheck size={18} />
@@ -31,7 +31,7 @@ const AdminLayout = () => {
                     </div>
                 </div>
                 
-                <nav className="flex-1 px-4 py-6 space-y-1">
+                <nav aria-label="Quản lý" className="flex-1 min-h-0 overflow-y-auto px-4 py-6 space-y-1">
                     <div className="px-3 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Quản lý</div>
                     
                     <Link 
@@ -75,7 +75,7 @@ const AdminLayout = () => {
                     </Link>
                 </nav>
 
-                <div className="p-4 border-t border-gray-100 space-y-1">
+                <div className="shrink-0 max-h-[calc(100dvh-4rem)] overflow-y-auto p-4 border-t border-gray-100 space-y-1">
                     <Link 
                         to="/admin/audit" 
                         className={`block px-3 py-2 text-sm rounded-lg transition-colors ${
@@ -112,7 +112,7 @@ const AdminLayout = () => {
             </aside>
 
             {/* Main Content Area */}
-            <main className="flex-1 flex flex-col min-w-0">
+            <main className="h-full min-h-0 flex-1 flex flex-col min-w-0">
                 {/* Header */}
                 <header className="h-16 bg-white border-b border-gray-200 flex items-center px-8 justify-between shrink-0">
                     <h1 className="text-lg font-semibold text-gray-800">
@@ -134,7 +134,7 @@ const AdminLayout = () => {
                 </header>
 
                 {/* Page Content */}
-                <div className="flex-1 overflow-auto p-8">
+                <div className="flex-1 min-h-0 overflow-auto overscroll-contain p-8">
                     <Outlet />
                 </div>
             </main>
