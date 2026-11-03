@@ -56,6 +56,10 @@ Cập nhật 26/10/2026 sau đợt triển khai P0 trong code. Quy ước bằng
 | --- | --- | --- | --- | --- |
 | G17 | P1, đã được giao | Sidebar giãn theo nội dung tab, đẩy Nhật ký an ninh/Kiosk/Đổi mật khẩu/Đăng xuất ra ngoài cửa sổ khi trang dài. | Giới hạn layout theo chiều cao viewport, nội dung cuộn riêng; nhóm thao tác cuối sidebar không co, menu có vùng cuộn khi cửa sổ thấp. | **Đã xác minh (giả lập trình duyệt), 03/11/2026** — `frontend/src/AdminLayout.jsx`. Chromium headless với API giả: 6 tab admin × 3 viewport (1440×900, 1280×600, 1024×360) = 18/18 ca đạt; cả 4 thao tác nằm trong viewport, vị trí sidebar không đổi khi cuộn nội dung dài, không lỗi JavaScript, không gọi API ghi. Script kiểm tra cục bộ `.runtime/check_admin_sidebar.py`. Frontend 15/15 test đạt; lint không lỗi (5 cảnh báo ở file khác); Vite build đạt tại `.runtime/sidebar-frontend-build-20261103` (tránh `dist` bị EPERM đã ghi tại G16); `git diff --check` đạt. Chưa triển khai cloud. |
 
+### Bằng chứng triển khai G16/G17 — 03/11/2026
+
+Đã push `level3-cloud` @ `8bdfb136` và fast-forward EC2 từ `843a8dad`; build/recreate Core và Web thành công. G16/G17 đã có trên bundle cloud `/assets/index-BH77iNUN.js` (kiểm tra chuỗi thống kê và class bố cục); HTTPS 200/TLS hợp lệ, HTTP 308, `/api/overview` anonymous vẫn 401. DB/AI healthy, AI ready đủ model và DB. Đây là kiểm tra triển khai/health, chưa xác minh dashboard bằng phiên admin thật hoặc phần cứng; các ca UI/logic vẫn là bằng chứng giả lập ở từng dòng trên. Backup DB/ảnh đã kiểm tra gzip/tar và sao chép ra máy local; image rollback giữ trên VM. Xem [sổ bằng chứng](ACCEPTANCE.md#sổ-bằng-chứng). Thiết bị `OFFLINE`; không flash/phát lệnh tới cửa thật.
+
 ## Kiến trúc đề xuất, chưa phải hạ tầng đã chốt
 
 ```text
